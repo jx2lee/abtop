@@ -184,7 +184,7 @@ pub(crate) fn draw_sessions_panel_active(
             &session.session_id
         };
 
-        let summary_col = app.session_summary(session);
+        let summary_col = app.session_title(session);
 
         let mut cells = vec![
             Cell::from(Span::styled(marker, Style::default().fg(theme.hi_fg))),
@@ -365,7 +365,14 @@ pub(crate) fn draw_sessions_panel_active(
         header_cells.push(Cell::from(Span::styled(config_label, header_style)));
     }
     header_cells.extend([
-        Cell::from(Span::styled(t("col.summary"), header_style)),
+        Cell::from(Span::styled(
+            t(if app.show_session_name {
+                "col.session_name"
+            } else {
+                "col.summary"
+            }),
+            header_style,
+        )),
         Cell::from(Span::styled(t("col.status"), header_style)),
     ]);
     if show_model {
@@ -1313,6 +1320,7 @@ mod tests {
             mem_line_count: 0,
             children: Vec::new(),
             initial_prompt: "prompt".into(),
+            session_name: String::new(),
             first_assistant_text: String::new(),
             chat_messages: Vec::new(),
             tool_calls: Vec::new(),
@@ -1514,6 +1522,7 @@ mod tests {
             mem_line_count: 0,
             children: Vec::new(),
             initial_prompt: "prompt".into(),
+            session_name: String::new(),
             first_assistant_text: String::new(),
             chat_messages: Vec::new(),
             tool_calls: Vec::new(),

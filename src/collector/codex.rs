@@ -687,6 +687,7 @@ impl CodexCollector {
                 mem_line_count: 0,
                 children,
                 initial_prompt: result.initial_prompt,
+                session_name: String::new(),
                 first_assistant_text: String::new(),
                 chat_messages: result.chat_messages,
                 tool_calls: result.tool_calls,

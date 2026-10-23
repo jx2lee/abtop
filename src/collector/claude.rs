@@ -634,6 +634,9 @@ impl ClaudeCollector {
                     if prev.initial_prompt.is_empty() && !delta.initial_prompt.is_empty() {
                         prev.initial_prompt = delta.initial_prompt;
                     }
+                    if !delta.session_name.is_empty() {
+                        prev.session_name = delta.session_name;
+                    }
                     prev.file_accesses.extend(delta.file_accesses);
                     // Sliding window: drop OLDEST entries past the cap so the
                     // cache always holds the most recent MAX_FILE_ACCESSES.
@@ -672,6 +675,7 @@ impl ClaudeCollector {
             file_identity: (0, 0),
             token_history: Vec::new(),
             initial_prompt: String::new(),
+            session_name: String::new(),
             first_assistant_text: String::new(),
             chat_messages: Vec::new(),
             tool_calls: Vec::new(),
@@ -700,6 +704,7 @@ impl ClaudeCollector {
         let context_history = cached.context_history.clone();
         let compaction_count = cached.compaction_count;
         let initial_prompt = cached.initial_prompt.clone();
+        let session_name = cached.session_name.clone();
         let first_assistant_text = cached.first_assistant_text.clone();
         let chat_messages = cached.chat_messages.clone();
         let tool_calls = cached.tool_calls.clone();
@@ -854,6 +859,7 @@ impl ClaudeCollector {
             mem_line_count,
             children,
             initial_prompt,
+            session_name,
             first_assistant_text,
             chat_messages,
             tool_calls,
@@ -1421,6 +1427,8 @@ struct TranscriptResult {
     file_identity: (u64, u64),
     token_history: Vec<u64>,
     initial_prompt: String,
+    /// Latest `/rename` title (`custom-title` line); empty when never renamed.
+    session_name: String,
     /// First assistant response text (text blocks only, no tool_use)
     first_assistant_text: String,
     /// Recent real chat messages, excluding tool_result wrappers and tool inputs.
@@ -1507,6 +1515,7 @@ fn parse_transcript_with_previous(
         file_identity: identity,
         token_history: Vec::new(),
         initial_prompt: String::new(),
+        session_name: String::new(),
         first_assistant_text: String::new(),
         chat_messages: Vec::new(),
         tool_calls: Vec::new(),
@@ -1845,6 +1854,22 @@ fn parse_transcript_with_previous(
                                 }
                             }
                         }
+                        // `/compact` writes its prompt as a plain `"/compact"`
+                        // user line, so the thinking window opens there. The
+                        // boundary marks compaction done; nothing replies after it.
+                        Some("system")
+                            if val.get("subtype").and_then(|s| s.as_str())
+                                == Some("compact_boundary") =>
+                        {
+                            result.last_user_ts_ms = 0;
+                            result.saw_turn = true;
+                        }
+                        // `/rename` appends a fresh line each time; the last one wins.
+                        Some("custom-title") => {
+                            if let Some(title) = val.get("customTitle").and_then(|t| t.as_str()) {
+                                result.session_name = title.to_string();
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1873,7 +1898,9 @@ fn parse_transcript_with_previous(
 /// real human prompt that the model still owes a reply for. Three forms:
 ///
 /// 1. `isMeta: true` — Claude Code's explicit marker for non-prompt
-///    entries (e.g. the `<local-command-caveat>` line).
+///    entries (e.g. the `<local-command-caveat>` line). `isCompactSummary:
+///    true` is treated the same: `/compact` writes its summary as a
+///    user-role line and no assistant reply follows it.
 /// 2. `content` is an array and every block is `tool_result` — the
 ///    user-role wrapper Claude Code uses to feed tool output back to
 ///    the model. A mixed block message is treated as a real prompt so
@@ -1885,8 +1912,10 @@ fn parse_transcript_with_previous(
 ///    invoke the model, so treating them as a prompt would leave
 ///    `last_user_ts_ms` stuck and pin the session in Thinking forever.
 fn is_synthetic_user_msg(entry: &Value) -> bool {
-    if entry.get("isMeta").and_then(|v| v.as_bool()).unwrap_or(false) {
-        return true;
+    for flag in ["isMeta", "isCompactSummary"] {
+        if entry.get(flag).and_then(|v| v.as_bool()).unwrap_or(false) {
+            return true;
+        }
     }
     let Some(message) = entry.get("message") else { return false };
     match message.get("content") {
@@ -2536,6 +2565,47 @@ mod tests {
         );
         // Title must come from the real prompt, not the synthetic lines.
         assert_eq!(result.initial_prompt, "hi");
+    }
+
+    #[test]
+    fn test_parse_transcript_compact_summary_does_not_open_thinking_window() {
+        // `/compact` writes its summary as a user-role line flagged
+        // `isCompactSummary` and never gets an assistant reply, so it must
+        // not pin the session in Thinking.
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write_lines(&mut file, &[
+            r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-03-28T15:00:01Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"hello"}]}}"#,
+            // The raw prompt line `/compact` writes before compacting.
+            r#"{"type":"user","timestamp":"2026-03-28T15:00:30Z","message":{"role":"user","content":"/compact"}}"#,
+            r#"{"type":"system","subtype":"compact_boundary","timestamp":"2026-03-28T15:01:00Z"}"#,
+            r#"{"type":"user","timestamp":"2026-03-28T15:01:00Z","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation..."}}"#,
+            r#"{"type":"user","timestamp":"2026-03-28T15:01:00Z","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: ...</local-command-caveat>"}}"#,
+            r#"{"type":"user","timestamp":"2026-03-28T15:01:00Z","message":{"role":"user","content":"<command-name>/compact</command-name>"}}"#,
+            r#"{"type":"user","timestamp":"2026-03-28T15:01:01Z","message":{"role":"user","content":"<local-command-stdout>Compacted</local-command-stdout>"}}"#,
+        ]);
+
+        let result = parse_transcript(file.path(), 0);
+
+        assert_eq!(
+            result.last_user_ts_ms, 0,
+            "/compact summary must not reopen the thinking window",
+        );
+        assert_eq!(result.initial_prompt, "hi");
+    }
+
+    #[test]
+    fn test_parse_transcript_session_name_uses_latest_rename() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write_lines(&mut file, &[
+            r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
+            r#"{"type":"custom-title","customTitle":"first name","sessionId":"abc"}"#,
+            r#"{"type":"custom-title","customTitle":"second name","sessionId":"abc"}"#,
+        ]);
+
+        let result = parse_transcript(file.path(), 0);
+
+        assert_eq!(result.session_name, "second name");
     }
 
     #[test]
