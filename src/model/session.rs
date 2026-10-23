@@ -201,6 +201,8 @@ pub struct AgentSession {
     pub children: Vec<ChildProcess>,
     /// First user prompt text, truncated — used as session title
     pub initial_prompt: String,
+    /// User-assigned session name (Claude Code `/rename`). Empty when unset.
+    pub session_name: String,
     /// First assistant response text (text blocks only) — used as summary fallback
     pub first_assistant_text: String,
     /// Recent user/assistant chat tail, excluding tool results and tool inputs.
@@ -326,6 +328,7 @@ mod tests {
             mem_line_count: 0,
             children: Vec::new(),
             initial_prompt: String::new(),
+            session_name: String::new(),
             first_assistant_text: String::new(),
             chat_messages: Vec::new(),
             tool_calls: Vec::new(),

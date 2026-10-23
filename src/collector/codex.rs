@@ -30,6 +30,52 @@ pub struct CodexCollector {
     /// Latest rate limit info parsed from Codex JSONL token_count events.
     pub last_rate_limit: Option<RateLimitInfo>,
     desktop_recent_scanner: DesktopRecentRolloutScanner,
+    session_names: SessionNameIndex,
+}
+
+/// Thread names set via Codex's `/rename`, read from
+/// `~/.codex/session_index.jsonl` (one `{id, thread_name}` line per rename;
+/// the last line for an id wins). Reloaded only when the file's mtime changes.
+struct SessionNameIndex {
+    path: PathBuf,
+    mtime: Option<std::time::SystemTime>,
+    names: HashMap<String, String>,
+}
+
+impl SessionNameIndex {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            mtime: None,
+            names: HashMap::new(),
+        }
+    }
+
+    fn refresh(&mut self) {
+        let mtime = fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        if mtime == self.mtime {
+            return;
+        }
+        self.mtime = mtime;
+        self.names.clear();
+        let Ok(file) = fs::File::open(&self.path) else {
+            return;
+        };
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let Ok(val) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let id = val.get("id").and_then(|v| v.as_str());
+            let name = val.get("thread_name").and_then(|v| v.as_str());
+            if let (Some(id), Some(name)) = (id, name) {
+                self.names.insert(id.to_string(), name.to_string());
+            }
+        }
+    }
+
+    fn get(&self, session_id: &str) -> Option<&String> {
+        self.names.get(session_id)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -108,10 +154,12 @@ impl DesktopRecentRolloutScanner {
 impl CodexCollector {
     pub fn new() -> Self {
         let home = dirs::home_dir().unwrap_or_default();
+        let codex_dir = home.join(".codex");
         Self {
-            sessions_dir: home.join(".codex").join("sessions"),
+            sessions_dir: codex_dir.join("sessions"),
             last_rate_limit: None,
             desktop_recent_scanner: DesktopRecentRolloutScanner::new(),
+            session_names: SessionNameIndex::new(codex_dir.join("session_index.jsonl")),
         }
     }
 
@@ -357,6 +405,13 @@ impl CodexCollector {
                         sessions.push(session);
                     }
                 }
+            }
+        }
+
+        self.session_names.refresh();
+        for session in &mut sessions {
+            if let Some(name) = self.session_names.get(&session.session_id) {
+                session.session_name = name.clone();
             }
         }
 
@@ -687,6 +742,7 @@ impl CodexCollector {
                 mem_line_count: 0,
                 children,
                 initial_prompt: result.initial_prompt,
+                session_name: String::new(),
                 first_assistant_text: String::new(),
                 chat_messages: result.chat_messages,
                 tool_calls: result.tool_calls,
@@ -2078,6 +2134,26 @@ mod tests {
     }
 
     #[test]
+    fn session_name_index_uses_latest_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session_index.jsonl");
+        write_jsonl(
+            &path,
+            &[
+                r#"{"id":"a","thread_name":"first","updated_at":"2026-10-16T07:33:48Z"}"#,
+                "not json",
+                r#"{"id":"b","thread_name":"other","updated_at":"2026-10-17T07:33:48Z"}"#,
+                r#"{"id":"a","thread_name":"second","updated_at":"2026-10-18T07:33:48Z"}"#,
+            ],
+        );
+        let mut index = SessionNameIndex::new(path);
+        index.refresh();
+        assert_eq!(index.get("a").map(String::as_str), Some("second"));
+        assert_eq!(index.get("b").map(String::as_str), Some("other"));
+        assert_eq!(index.get("c"), None);
+    }
+
+    #[test]
     fn desktop_filesystem_only_rollout_is_unknown_without_fd_owner() {
         let sessions = tempfile::tempdir().unwrap();
         let today = sessions
@@ -2091,6 +2167,7 @@ mod tests {
             sessions_dir: sessions.path().to_path_buf(),
             last_rate_limit: None,
             desktop_recent_scanner: DesktopRecentRolloutScanner::new(),
+            session_names: SessionNameIndex::new(sessions.path().join("session_index.jsonl")),
         };
         let mut shared = super::super::SharedProcessData {
             process_info: HashMap::new(),

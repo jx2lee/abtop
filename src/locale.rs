@@ -34,6 +34,7 @@ static LOCALE_EN: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::ne
     m.insert("col.session", "Session");
     m.insert("col.sess", "Sess");
     m.insert("col.summary", "Summary");
+    m.insert("col.session_name", "Session name");
     m.insert("col.status", "Status");
     m.insert("col.model", "Model");
     m.insert("col.context", "Context");
@@ -125,6 +126,7 @@ static LOCALE_EN: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::ne
     m.insert("help.cycle_theme", "cycle theme / toggle tree");
     m.insert("help.toggle_timeline", "toggle timeline");
     m.insert("help.toggle_file_audit", "toggle file audit");
+    m.insert("help.toggle_session_name", "summary ↔ session name");
     m.insert(
         "help.toggle_panels",
         "toggle panels (context/quota/tokens/projects/ports/sessions/mcp)",
@@ -285,6 +287,7 @@ static LOCALE_ZH: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::ne
     m.insert("col.session", "会话");
     m.insert("col.sess", "会");
     m.insert("col.summary", "摘要");
+    m.insert("col.session_name", "会话名称");
     m.insert("col.status", "状态");
     m.insert("col.model", "模型");
     m.insert("col.context", "上下文");
@@ -376,6 +379,7 @@ static LOCALE_ZH: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::ne
     m.insert("help.cycle_theme", "切换主题 / 切换树视图");
     m.insert("help.toggle_timeline", "切换时间线");
     m.insert("help.toggle_file_audit", "切换文件审计");
+    m.insert("help.toggle_session_name", "摘要 ↔ 会话名称");
     m.insert(
         "help.toggle_panels",
         "切换面板 (上下文/配额/词元/项目/端口/会话/MCP)",

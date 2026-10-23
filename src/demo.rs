@@ -109,6 +109,7 @@ pub fn populate_demo(app: &mut App) {
                 },
             ],
             initial_prompt: "Implement Stripe payment integration for checkout flow".into(),
+            session_name: String::new(),
             tool_calls: vec![
                 ToolCall {
                     name: "Read".into(),
@@ -305,6 +306,7 @@ pub fn populate_demo(app: &mut App) {
                 },
             ],
             initial_prompt: "Add batch inference endpoint with GPU scheduling".into(),
+            session_name: String::new(),
             tool_calls: vec![],
             pending_since_ms: 0,
             thinking_since_ms: 0,
@@ -376,6 +378,7 @@ pub fn populate_demo(app: &mut App) {
                 },
             ],
             initial_prompt: "Fix CORS headers and add rate limiting middleware".into(),
+            session_name: String::new(),
             tool_calls: vec![
                 ToolCall {
                     name: "Read".into(),
@@ -465,6 +468,7 @@ pub fn populate_demo(app: &mut App) {
                 },
             ],
             initial_prompt: "Create interactive heatmap component with D3.js".into(),
+            session_name: String::new(),
             tool_calls: vec![],
             pending_since_ms: 0,
             thinking_since_ms: 0,
@@ -508,6 +512,7 @@ pub fn populate_demo(app: &mut App) {
             first_assistant_text: String::new(),
             chat_messages: vec![],
             initial_prompt: "Refactor Terraform modules for multi-region".into(),
+            session_name: String::new(),
             tool_calls: vec![],
             pending_since_ms: 0,
             thinking_since_ms: 0,
