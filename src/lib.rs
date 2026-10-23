@@ -359,6 +359,7 @@ fn handle_key_press(
             KeyCode::Char('/') => app.filter_active = true,
             KeyCode::Esc if !app.filter_text.is_empty() => app.clear_filter(),
             KeyCode::Char('f') | KeyCode::Char('F') => app.toggle_file_audit(),
+            KeyCode::Char('n') => app.toggle_session_name(),
             KeyCode::Enter if !demo_mode => match jump_to_session(app) {
                 JumpOutcome::Jumped if exit_on_jump => app.quit(),
                 JumpOutcome::Failed(msg) => app.set_status(msg),

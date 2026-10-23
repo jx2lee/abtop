@@ -134,6 +134,8 @@ pub struct App {
     pub config_open: bool,
     pub config_selected: usize,
     pub tree_view: bool,
+    /// Show `/rename` session names in place of summaries (`n`).
+    pub show_session_name: bool,
     pub filter_text: String,
     pub filter_active: bool,
     pub show_timeline: bool,
@@ -205,6 +207,7 @@ impl App {
             config_open: false,
             config_selected: 0,
             tree_view: false,
+            show_session_name: false,
             filter_text: String::new(),
             filter_active: false,
             show_timeline: false,
@@ -278,6 +281,10 @@ impl App {
 
     pub fn toggle_file_audit(&mut self) {
         self.show_file_audit = !self.show_file_audit;
+    }
+
+    pub fn toggle_session_name(&mut self) {
+        self.show_session_name = !self.show_session_name;
     }
 
     pub fn toggle_config(&mut self) {
@@ -802,6 +809,17 @@ impl App {
         crate::jump::run_jump(target_pid)
     }
 
+    /// Summary column text: the session name when toggled on and set,
+    /// otherwise the regular summary.
+    pub fn session_title(&self, session: &AgentSession) -> String {
+        if self.show_session_name && !session.session_name.is_empty() {
+            // No length cap: the table truncates to the column width.
+            sanitize_fallback(&session.session_name, usize::MAX)
+        } else {
+            self.session_summary(session)
+        }
+    }
+
     /// Get the display summary for a session: LLM summary > "..." if pending > raw prompt > "—"
     /// Done sessions skip pending state to avoid stuck "..." display.
     pub fn session_summary(&self, session: &AgentSession) -> String {
@@ -1045,6 +1063,7 @@ mod tests {
             mem_line_count: 0,
             children: vec![],
             initial_prompt: String::new(),
+            session_name: String::new(),
             first_assistant_text: String::new(),
             chat_messages: vec![],
             tool_calls: vec![],
