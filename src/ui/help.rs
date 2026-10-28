@@ -27,6 +27,7 @@ fn get_entries() -> Vec<(String, String)> {
         ("  f".to_string(), t("help.toggle_file_audit")),
         ("  1-7".to_string(), t("help.toggle_panels")),
         ("  M".to_string(), t("help.mcp_suppress")),
+        ("  K".to_string(), t("help.show_killed")),
         (t("help.help"), String::new()),
         ("  ?".to_string(), t("help.this_help")),
         (t("help.legend"), String::new()),

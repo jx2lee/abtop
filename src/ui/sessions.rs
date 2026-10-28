@@ -156,13 +156,17 @@ pub(crate) fn draw_sessions_panel_active(
             crate::model::SessionStatus::Unknown => (t("sess.unknown"), theme.inactive_fg),
             crate::model::SessionStatus::RateLimited => (t("sess.rate"), theme.status_fg),
             crate::model::SessionStatus::Done => (t("sess.done"), theme.inactive_fg),
+            crate::model::SessionStatus::Killed => (t("sess.killed"), theme.warning_fg),
         };
 
         let is_1m = session.context_window >= 1_000_000 || session.model.contains("[1m]");
         let model_short = shorten_model(&session.model, is_1m);
         let ctx_color = grad_at(&proc_grad, session.context_percent);
 
-        let is_done = matches!(session.status, crate::model::SessionStatus::Done);
+        let is_done = matches!(
+            session.status,
+            crate::model::SessionStatus::Done | crate::model::SessionStatus::Killed
+        );
         let row_style = if selected {
             Style::default()
                 .bg(theme.selected_bg)

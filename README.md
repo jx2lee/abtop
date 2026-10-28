@@ -152,11 +152,25 @@ When `language` is unset, abtop auto-detects from `LANG` — any value starting 
 | `Enter`            | Jump to session terminal             |
 | `x`                | Kill selected session                |
 | `X`                | Kill all orphan ports                |
+| `K`                | Show/hide killed Claude sessions     |
 | `t`                | Cycle theme                          |
 | `1`–`5`            | Toggle panel visibility              |
 | `Esc`              | Open/close config page               |
 | `q`                | Quit                                 |
 | `r`                | Force refresh                        |
+
+### Killed Sessions
+
+When a reboot, `tmux kill-server`, or a crash takes down running Claude Code
+sessions, abtop remembers them. Press `K` to list sessions that ended without
+`/exit` as `✗ Killed`. On a Killed row, `Enter` shows the
+`claude --resume <id>` command to bring it back, and `x` (twice) dismisses it.
+
+abtop records live sessions in `~/.cache/abtop/claude_sessions.json`
+(`~/Library/Caches/abtop/` on macOS), so it can only report sessions it saw
+running. Keep it open, or run it once after starting your sessions. Exits that
+leave no trace (Ctrl+C, Ctrl+D) also show up as Killed. Records are dropped 7
+days after the transcript last changed.
 
 ## Library / JSON snapshot
 

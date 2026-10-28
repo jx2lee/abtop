@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod codex;
+pub(crate) mod killed;
 pub mod mcp;
 pub mod opencode;
 pub mod process;
@@ -107,6 +108,11 @@ pub trait AgentCollector {
     /// Used to feed rate limit lookups across all active config dirs.
     fn discovered_config_dirs(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
+    }
+
+    /// Stop listing a Killed session. Returns true if this collector owned it.
+    fn forget_killed(&mut self, _session_id: &str) -> bool {
+        false
     }
 }
 
@@ -303,6 +309,8 @@ pub struct MultiCollector {
     /// behavior (mcp-server PIDs and their rollouts appear there too,
     /// with the existing 1-of-N HashMap-overwrite caveat).
     pub mcp_suppress: bool,
+    /// Whether Killed sessions are returned from `collect` (toggle: Shift+K).
+    pub show_killed: bool,
     desktop_rollout_scanner: DesktopRolloutScanner,
 }
 
@@ -347,12 +355,24 @@ impl MultiCollector {
             orphan_ports: Vec::new(),
             mcp_servers: Vec::new(),
             mcp_suppress: true,
+            show_killed: false,
             desktop_rollout_scanner: DesktopRolloutScanner::new(),
         }
     }
 
     pub fn set_mcp_suppress(&mut self, on: bool) {
         self.mcp_suppress = on;
+    }
+
+    pub fn set_show_killed(&mut self, on: bool) {
+        self.show_killed = on;
+    }
+
+    /// Stop listing a Killed session. Returns true if any collector owned it.
+    pub fn forget_killed(&mut self, session_id: &str) -> bool {
+        self.collectors
+            .iter_mut()
+            .any(|c| c.forget_killed(session_id))
     }
 
     /// Collect rate limit info from all registered collectors.
@@ -441,8 +461,20 @@ impl MultiCollector {
         }
 
         // Hide dead sessions: Codex uses pid==0 sentinel, Claude is filtered in collect().
-        all.retain(|s| !matches!(s.status, SessionStatus::Done));
-        all.sort_by_key(|s| std::cmp::Reverse(s.started_at));
+        // Killed sessions are only listed while the Shift+K toggle is on.
+        let show_killed = self.show_killed;
+        all.retain(|s| match s.status {
+            SessionStatus::Done => false,
+            SessionStatus::Killed => show_killed,
+            _ => true,
+        });
+        // Live sessions first, then Killed ones; newest first within each group.
+        all.sort_by_key(|s| {
+            (
+                matches!(s.status, SessionStatus::Killed),
+                std::cmp::Reverse(s.started_at),
+            )
+        });
 
         // --- Orphan port detection ---
         // 1. Update tracked port children from live sessions

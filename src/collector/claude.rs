@@ -1,3 +1,4 @@
+use super::killed::{format_ago, KilledTracker, TrackedSession};
 use super::process::{self, ProcInfo};
 use crate::model::{
     AgentSession, ChatMessage, ChatRole, ChildProcess, FileAccess, FileOp, LaunchSurface,
@@ -54,6 +55,13 @@ pub struct ClaudeCollector {
     /// Cached transcript parse results keyed by session_id.
     /// On each tick, only new bytes since `new_offset` are parsed.
     transcript_cache: HashMap<String, TranscriptResult>,
+    /// Remembers live sessions across runs to surface killed ones.
+    killed_tracker: KilledTracker,
+    /// Transcript path of each interactive session seen alive this tick.
+    live_transcripts: HashMap<String, PathBuf>,
+    /// Full-parse results for killed sessions, keyed by session_id and
+    /// invalidated when the transcript's file identity changes.
+    killed_cache: HashMap<String, ((u64, u64), TranscriptResult)>,
 }
 
 impl ClaudeCollector {
@@ -67,6 +75,14 @@ impl ClaudeCollector {
             config_dirs: Vec::new(),
             configured_config_dirs,
             transcript_cache: HashMap::new(),
+            // Keep tests away from the user's real cache file.
+            killed_tracker: if cfg!(test) {
+                KilledTracker::with_path(None)
+            } else {
+                KilledTracker::persistent()
+            },
+            live_transcripts: HashMap::new(),
+            killed_cache: HashMap::new(),
         }
     }
 
@@ -154,6 +170,7 @@ impl ClaudeCollector {
 
         let discovery_ctx = build_discovery_context(&session_paths, &shared.process_info, self_pid);
 
+        self.live_transcripts.clear();
         let mut sessions = self.load_session_paths(
             &session_paths,
             &shared.process_info,
@@ -165,7 +182,130 @@ impl ClaudeCollector {
         self.evict_stale_cache(&sessions);
 
         sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at));
+        sessions.extend(self.track_killed(&sessions));
         sessions
+    }
+
+    /// Feed this tick's live sessions to the tracker and build rows for
+    /// sessions that vanished without a clean `/exit`.
+    fn track_killed(&mut self, live: &[AgentSession]) -> Vec<AgentSession> {
+        let tracked: Vec<TrackedSession> = live
+            .iter()
+            .filter_map(|s| {
+                let transcript = self.live_transcripts.get(&s.session_id)?;
+                Some(TrackedSession {
+                    session_id: s.session_id.clone(),
+                    pid: s.pid,
+                    cwd: s.cwd.clone(),
+                    started_at: s.started_at,
+                    transcript: transcript.clone(),
+                    killed: false,
+                    seen_live: true,
+                })
+            })
+            .collect();
+        self.killed_tracker.update(tracked);
+
+        let killed = self.killed_tracker.killed();
+        let killed_ids: std::collections::HashSet<&str> =
+            killed.iter().map(|s| s.session_id.as_str()).collect();
+        self.killed_cache
+            .retain(|sid, _| killed_ids.contains(sid.as_str()));
+        killed
+            .iter()
+            .filter_map(|rec| self.killed_session(rec))
+            .collect()
+    }
+
+    /// Forget a killed session so it is no longer listed.
+    pub fn forget_killed(&mut self, session_id: &str) -> bool {
+        self.killed_cache.remove(session_id);
+        self.killed_tracker.forget(session_id)
+    }
+
+    fn killed_session(&mut self, rec: &TrackedSession) -> Option<AgentSession> {
+        if is_symlink(&rec.transcript) || !rec.transcript.exists() {
+            return None;
+        }
+        let identity = file_identity(&rec.transcript);
+        let fresh = self
+            .killed_cache
+            .get(&rec.session_id)
+            .is_some_and(|(id, _)| *id == identity);
+        if !fresh {
+            let parsed = parse_transcript_with_previous(&rec.transcript, 0, 0, 0);
+            self.killed_cache
+                .insert(rec.session_id.clone(), (identity, parsed));
+        }
+        let t = &self.killed_cache.get(&rec.session_id)?.1;
+
+        let configured_model = read_configured_model(&rec.cwd);
+        let context_window = crate::collector::context_window_for_model(
+            &t.model,
+            &configured_model,
+            t.max_context_tokens,
+        );
+        let context_percent = if context_window > 0 {
+            (t.last_context_tokens as f64 / context_window as f64) * 100.0
+        } else {
+            0.0
+        };
+        let ago = std::time::SystemTime::now()
+            .duration_since(t.last_activity)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let config_root = rec
+            .transcript
+            .parent() // projects/<encoded-cwd>
+            .and_then(Path::parent) // projects
+            .and_then(Path::parent) // config root
+            .map(super::abbrev_path)
+            .unwrap_or_default();
+
+        Some(AgentSession {
+            agent_cli: "claude",
+            launch_surface: LaunchSurface::Cli,
+            // PID 0: the old PID may already belong to an unrelated process.
+            pid: 0,
+            session_id: rec.session_id.clone(),
+            cwd: rec.cwd.clone(),
+            project_name: process::last_path_segment(&rec.cwd)
+                .unwrap_or("?")
+                .to_string(),
+            started_at: rec.started_at,
+            status: SessionStatus::Killed,
+            model: t.model.clone(),
+            effort: String::new(),
+            context_percent,
+            total_input_tokens: t.total_input,
+            total_output_tokens: t.total_output,
+            total_cache_read: t.total_cache_read,
+            total_cache_create: t.total_cache_create,
+            turn_count: t.turn_count,
+            current_tasks: vec![format!("killed · last active {} ago", format_ago(ago))],
+            mem_mb: 0,
+            version: t.version.clone(),
+            git_branch: t.git_branch.clone(),
+            git_added: 0,
+            git_modified: 0,
+            token_history: t.token_history.clone(),
+            context_history: t.context_history.clone(),
+            compaction_count: t.compaction_count,
+            context_window,
+            subagents: Vec::new(),
+            mem_file_count: 0,
+            mem_line_count: 0,
+            children: Vec::new(),
+            initial_prompt: t.initial_prompt.clone(),
+            session_name: t.session_name.clone(),
+            first_assistant_text: t.first_assistant_text.clone(),
+            chat_messages: t.chat_messages.clone(),
+            tool_calls: t.tool_calls.clone(),
+            pending_since_ms: 0,
+            thinking_since_ms: 0,
+            file_accesses: t.file_accesses.clone(),
+            config_root,
+        })
     }
 
     /// Drop `transcript_cache` entries for session_ids that are no longer
@@ -668,6 +808,15 @@ impl ClaudeCollector {
         let memory_dir = project_dir.join("memory");
         let (mem_file_count, mem_line_count) = Self::collect_memory_status(&memory_dir);
 
+        // Only interactive sessions can be resumed, so only those are tracked
+        // for the Killed state; `claude --print` runs never end with `/exit`.
+        if sf.kind.is_empty() || sf.kind == "interactive" {
+            if let Some(tp) = &transcript_path {
+                self.live_transcripts
+                    .insert(sf.session_id.clone(), tp.clone());
+            }
+        }
+
         // Effort level (persistent `effortLevel` from settings files).
         // Note: the `/effort` slash command is session-scoped and does NOT persist,
         // so this only reflects settings.json — not live in-session overrides.
@@ -841,6 +990,10 @@ impl super::AgentCollector for ClaudeCollector {
 
     fn discovered_config_dirs(&self) -> Vec<PathBuf> {
         self.config_dirs.iter().map(ConfigDir::base_dir).collect()
+    }
+
+    fn forget_killed(&mut self, session_id: &str) -> bool {
+        ClaudeCollector::forget_killed(self, session_id)
     }
 }
 
