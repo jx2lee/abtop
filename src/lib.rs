@@ -360,6 +360,7 @@ fn handle_key_press(
             KeyCode::Esc if !app.filter_text.is_empty() => app.clear_filter(),
             KeyCode::Char('f') | KeyCode::Char('F') => app.toggle_file_audit(),
             KeyCode::Char('n') => app.toggle_session_name(),
+            KeyCode::Char('K') if !demo_mode => app.toggle_show_killed(),
             KeyCode::Enter if !demo_mode => match jump_to_session(app) {
                 JumpOutcome::Jumped if exit_on_jump => app.quit(),
                 JumpOutcome::Failed(msg) => app.set_status(msg),
@@ -461,6 +462,7 @@ fn print_snapshot(app: &App) {
             model::SessionStatus::Unknown => "? Unknown",
             model::SessionStatus::RateLimited => "⏳ Rate",
             model::SessionStatus::Done => "✓ Done",
+            model::SessionStatus::Killed => "✗ Killed",
         };
         let sid_short = if session.session_id.len() >= 7 {
             &session.session_id[..7]

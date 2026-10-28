@@ -26,6 +26,7 @@ static LOCALE_EN: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::ne
     m.insert("sess.unknown", "? Unknown");
     m.insert("sess.rate", "⏳ Rate");
     m.insert("sess.done", "✓ Done");
+    m.insert("sess.killed", "✗ Killed");
 
     // Column headers
     m.insert("col.ai", "AI");
@@ -134,6 +135,10 @@ static LOCALE_EN: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::ne
     m.insert(
         "help.mcp_suppress",
         "toggle mcp-server suppression in sessions panel",
+    );
+    m.insert(
+        "help.show_killed",
+        "show/hide killed sessions (x dismisses, Enter shows resume)",
     );
     m.insert("help.this_help", "this help");
     m.insert("help.legend", "Legend");
@@ -279,6 +284,7 @@ static LOCALE_ZH: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::ne
     m.insert("sess.unknown", "? Unknown");
     m.insert("sess.rate", "⏳ 限速");
     m.insert("sess.done", "✓ 完成");
+    m.insert("sess.killed", "✗ 已终止");
 
     // Column headers
     m.insert("col.ai", "AI");
@@ -385,6 +391,10 @@ static LOCALE_ZH: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::ne
         "切换面板 (上下文/配额/词元/项目/端口/会话/MCP)",
     );
     m.insert("help.mcp_suppress", "切换会话面板中的 MCP 服务器隐藏");
+    m.insert(
+        "help.show_killed",
+        "显示/隐藏已终止的会话（x 移除，Enter 显示恢复命令）",
+    );
     m.insert("help.this_help", "显示帮助");
     m.insert("help.legend", "图例");
     m.insert(

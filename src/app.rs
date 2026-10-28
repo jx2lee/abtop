@@ -131,6 +131,9 @@ pub struct App {
     /// When true (default), mcp-server-owned rollouts are hidden from
     /// the sessions panel. Toggle with Shift+M.
     pub mcp_suppress_sessions: bool,
+    /// When true, sessions that vanished without `/exit` are listed as
+    /// Killed. Toggle with Shift+K.
+    pub show_killed: bool,
     pub config_open: bool,
     pub config_selected: usize,
     pub tree_view: bool,
@@ -204,6 +207,7 @@ impl App {
             maximized_narrow_section: None,
             mcp_servers: Vec::new(),
             mcp_suppress_sessions: true,
+            show_killed: false,
             config_open: false,
             config_selected: 0,
             tree_view: false,
@@ -262,6 +266,24 @@ impl App {
             "off"
         };
         self.set_status(format!("mcp session suppression: {}", label));
+    }
+
+    /// Toggle listing of Killed sessions (crashed, killed, or lost to a
+    /// reboot without `/exit`). Re-collects so the change shows immediately.
+    pub fn toggle_show_killed(&mut self) {
+        self.show_killed = !self.show_killed;
+        self.tick();
+        let killed = self
+            .sessions
+            .iter()
+            .filter(|s| matches!(s.status, SessionStatus::Killed))
+            .count();
+        let msg = if self.show_killed {
+            format!("killed sessions: shown ({})", killed)
+        } else {
+            "killed sessions: hidden".to_string()
+        };
+        self.set_status(msg);
     }
 
     fn persist_panel_visibility(&mut self) {
@@ -514,6 +536,7 @@ impl App {
     /// spawn subprocesses or consume the user's Claude quota.
     pub fn tick_no_summaries(&mut self) {
         self.collector.set_mcp_suppress(self.mcp_suppress_sessions);
+        self.collector.set_show_killed(self.show_killed);
         self.sessions = self.collector.collect();
         self.orphan_ports = self.collector.orphan_ports.clone();
         self.mcp_servers = self.collector.mcp_servers.clone();
@@ -581,6 +604,10 @@ impl App {
 
         // Spawn summary jobs for sessions that need one
         for s in &self.sessions {
+            if matches!(s.status, SessionStatus::Killed) {
+                // Not worth a `claude --print` call; the prompt fallback is shown.
+                continue;
+            }
             let retries = self
                 .summary_retries
                 .get(&s.session_id)
@@ -618,7 +645,8 @@ impl App {
     /// True if any session still qualifies for a summary retry.
     pub fn has_retryable_summaries(&self) -> bool {
         self.sessions.iter().any(|s| {
-            (!s.initial_prompt.is_empty() || !s.first_assistant_text.is_empty())
+            !matches!(s.status, SessionStatus::Killed)
+                && (!s.initial_prompt.is_empty() || !s.first_assistant_text.is_empty())
                 && !self.summaries.contains_key(&s.session_id)
                 && !self.pending_summaries.contains(&s.session_id)
                 && self
@@ -719,6 +747,10 @@ impl App {
             return;
         }
         let session = &self.sessions[self.selected];
+        if matches!(session.status, SessionStatus::Killed) {
+            self.dismiss_selected_killed();
+            return;
+        }
         if matches!(session.status, SessionStatus::Done | SessionStatus::Unknown) {
             return;
         }
@@ -757,6 +789,29 @@ impl App {
             .unwrap_or_else(|| format!("PID {}", session.pid));
         self.kill_confirm = Some((self.selected, Instant::now()));
         self.set_status(format!("Press x again to kill: {}", name));
+    }
+
+    /// Remove the selected Killed session from the list (press `x` twice).
+    /// Only abtop's record is dropped; the transcript stays on disk.
+    fn dismiss_selected_killed(&mut self) {
+        if let Some((idx, ts)) = self.kill_confirm.take() {
+            if idx == self.selected && ts.elapsed().as_secs() < 2 {
+                let sid = self.sessions[self.selected].session_id.clone();
+                if self.collector.forget_killed(&sid) {
+                    self.set_status(format!("dismissed killed session {}", sid));
+                }
+                self.tick();
+                return;
+            }
+        }
+        let session = &self.sessions[self.selected];
+        let name = self
+            .summaries
+            .get(&session.session_id)
+            .cloned()
+            .unwrap_or_else(|| session.session_id.clone());
+        self.kill_confirm = Some((self.selected, Instant::now()));
+        self.set_status(format!("Press x again to dismiss: {}", name));
     }
 
     /// Kill all orphan port processes (Shift+X).
@@ -805,7 +860,15 @@ impl App {
         if self.sessions.is_empty() {
             return JumpOutcome::NoOp;
         }
-        let target_pid = self.sessions[self.selected].pid;
+        let session = &self.sessions[self.selected];
+        if matches!(session.status, SessionStatus::Killed) {
+            // No terminal to focus; show how to bring the session back.
+            return JumpOutcome::Failed(format!(
+                "resume: cd {} && claude --resume {}",
+                session.cwd, session.session_id
+            ));
+        }
+        let target_pid = session.pid;
         crate::jump::run_jump(target_pid)
     }
 
@@ -825,7 +888,7 @@ impl App {
     pub fn session_summary(&self, session: &AgentSession) -> String {
         if let Some(summary) = self.summaries.get(&session.session_id) {
             summary.clone()
-        } else if matches!(session.status, SessionStatus::Done) {
+        } else if matches!(session.status, SessionStatus::Done | SessionStatus::Killed) {
             // Done sessions: don't wait for pending summary, show fallback immediately
             if !session.initial_prompt.is_empty() {
                 sanitize_fallback(&session.initial_prompt, 80)
