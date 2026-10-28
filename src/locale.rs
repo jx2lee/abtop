@@ -136,7 +136,7 @@ static LOCALE_EN: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::ne
     );
     m.insert(
         "help.show_killed",
-        "show/hide killed sessions (x dismisses, Enter shows resume)",
+        "show/hide killed sessions (x dismisses, Enter resumes)",
     );
     m.insert("help.this_help", "this help");
     m.insert("help.legend", "Legend");
@@ -389,7 +389,7 @@ static LOCALE_ZH: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::ne
     m.insert("help.mcp_suppress", "切换会话面板中的 MCP 服务器隐藏");
     m.insert(
         "help.show_killed",
-        "显示/隐藏已终止的会话（x 移除，Enter 显示恢复命令）",
+        "显示/隐藏已终止的会话（x 移除，Enter 恢复）",
     );
     m.insert("help.this_help", "显示帮助");
     m.insert("help.legend", "图例");

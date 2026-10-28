@@ -53,3 +53,51 @@ impl TerminalJumper for TmuxJumper {
         JumpAttempt::Jumped
     }
 }
+
+/// Reopen a dead Claude session in a new tmux window: `new-window` in the
+/// session's cwd, then type `claude --resume <sid>` into the window's shell so
+/// the user's PATH and aliases apply and the shell survives the agent exiting.
+/// `NotApplicable` when abtop is not inside tmux.
+pub fn resume_claude(cwd: &str, session_id: &str) -> JumpAttempt {
+    if std::env::var("TMUX").is_err() {
+        return JumpAttempt::NotApplicable;
+    }
+    // The id is typed into a shell; refuse anything but a plain UUID-like token.
+    if session_id.is_empty()
+        || !session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return JumpAttempt::Failed(format!("refusing unsafe session id {session_id:?}"));
+    }
+    let mut args = vec!["new-window", "-P", "-F", "#{pane_id}"];
+    if std::path::Path::new(cwd).is_dir() {
+        args.extend(["-c", cwd]);
+    }
+    let out = match Command::new("tmux").args(&args).output() {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            return JumpAttempt::Failed(format!(
+                "new-window failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ))
+        }
+        Err(e) => return JumpAttempt::Failed(format!("tmux not runnable ({e})")),
+    };
+    let pane = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let cmd = format!("claude --resume {session_id}");
+    let typed = Command::new("tmux")
+        .args(["send-keys", "-t", &pane, "-l", &cmd])
+        .status()
+        .is_ok_and(|s| s.success());
+    let entered = typed
+        && Command::new("tmux")
+            .args(["send-keys", "-t", &pane, "Enter"])
+            .status()
+            .is_ok_and(|s| s.success());
+    if entered {
+        JumpAttempt::Jumped
+    } else {
+        JumpAttempt::Failed(format!("could not start `{cmd}` in pane {pane}"))
+    }
+}

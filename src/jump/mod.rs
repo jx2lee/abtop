@@ -79,6 +79,16 @@ pub fn run_jump(pid: u32) -> JumpOutcome {
     resolve(&jumpers(), pid)
 }
 
+/// Bring a dead Claude session back with `claude --resume` in a new tmux
+/// window. `NoOp` outside tmux, so the caller can fall back to a hint.
+pub fn run_resume(cwd: &str, session_id: &str) -> JumpOutcome {
+    match tmux::resume_claude(cwd, session_id) {
+        JumpAttempt::NotApplicable => JumpOutcome::NoOp,
+        JumpAttempt::Jumped => JumpOutcome::Jumped,
+        JumpAttempt::Failed(msg) => JumpOutcome::Failed(format!("tmux: {msg}")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared parsing helpers (pure — unit-tested below).
 // ---------------------------------------------------------------------------

@@ -279,7 +279,7 @@ Tracks child processes that have open ports. When a parent session dies but the 
 | `↑`/`↓` or `k`/`j` | Select session in list |
 | `Enter` | Jump to session terminal (cmux / tmux / iTerm2) |
 | `x` | Kill selected session (SIGKILL); on a Killed row, dismiss it |
-| `K` | Show/hide Killed Claude sessions (`Enter` on one shows the resume command) |
+| `K` | Show/hide Killed Claude sessions (`Enter` twice on one resumes it in a new tmux window, or shows the command outside tmux) |
 | `X` | Kill all orphan ports |
 | `q` | Quit |
 | `r` | Force refresh |
