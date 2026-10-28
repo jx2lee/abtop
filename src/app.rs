@@ -113,6 +113,8 @@ pub struct App {
     pub status_msg: Option<(String, Instant)>,
     /// Kill confirmation: (selected_index, timestamp). Expires after 2s.
     kill_confirm: Option<(usize, Instant)>,
+    /// Pending Enter-to-resume confirmation for a Killed row: (selected index, timestamp)
+    resume_confirm: Option<(usize, Instant)>,
     pub theme: Theme,
     pub show_context: bool,
     pub show_quota: bool,
@@ -194,6 +196,7 @@ impl App {
             orphan_ports: Vec::new(),
             status_msg: None,
             kill_confirm: None,
+            resume_confirm: None,
             theme,
             show_context: panels.context,
             show_quota: panels.quota,
@@ -862,14 +865,41 @@ impl App {
         }
         let session = &self.sessions[self.selected];
         if matches!(session.status, SessionStatus::Killed) {
-            // No terminal to focus; show how to bring the session back.
-            return JumpOutcome::Failed(format!(
-                "resume: cd {} && claude --resume {}",
-                session.cwd, session.session_id
-            ));
+            return self.resume_selected_killed();
         }
         let target_pid = session.pid;
         crate::jump::run_jump(target_pid)
+    }
+
+    /// Enter on a Killed row: no terminal is left to focus, so reopen it with
+    /// `claude --resume` in a new tmux window (press Enter twice, so one stray
+    /// press cannot spawn a duplicate). Outside tmux, show the command instead.
+    fn resume_selected_killed(&mut self) -> JumpOutcome {
+        let session = &self.sessions[self.selected];
+        let (cwd, sid) = (session.cwd.clone(), session.session_id.clone());
+        let hint = format!("resume: cd {} && claude --resume {}", cwd, sid);
+        if std::env::var("TMUX").is_err() {
+            return JumpOutcome::Failed(hint);
+        }
+        if let Some((idx, ts)) = self.resume_confirm.take() {
+            if idx == self.selected && ts.elapsed().as_secs() < 2 {
+                return match crate::jump::run_resume(&cwd, &sid) {
+                    JumpOutcome::NoOp => JumpOutcome::Failed(hint),
+                    outcome => outcome,
+                };
+            }
+        }
+        let name = self
+            .summaries
+            .get(&sid)
+            .cloned()
+            .unwrap_or_else(|| sid.clone());
+        self.resume_confirm = Some((self.selected, Instant::now()));
+        self.set_status(format!(
+            "Press Enter again to resume in a new tmux window: {}",
+            name
+        ));
+        JumpOutcome::NoOp
     }
 
     /// Summary column text: the session name when toggled on and set,
