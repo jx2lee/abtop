@@ -173,7 +173,7 @@ abtop records live sessions in `~/.cache/abtop/claude_sessions.json`
 running. Keep it open, or run it once after starting your sessions. Exits that
 leave no trace (Ctrl+C, Ctrl+D) show up as `killed`. Records are dropped 30
 days after the transcript last changed, matching Claude Code's default
-transcript cleanup.
+transcript cleanup. Sessions run under `/tmp` are not listed.
 
 ## Library / JSON snapshot
 

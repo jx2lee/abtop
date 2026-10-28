@@ -9,6 +9,9 @@
 //! (current Claude Code), then as the last turn of the transcript (older
 //! versions). Either way the record is marked stopped; a clean exit is
 //! remembered as `exited` so the row can say so. `x` dismisses a row.
+//!
+//! Sessions run from a temp directory (`/tmp`, `/private/tmp`) are throwaway
+//! and never tracked.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -96,7 +99,7 @@ impl KilledTracker {
         let live_ids: HashSet<String> = live.iter().map(|s| s.session_id.clone()).collect();
         let live_pids: HashSet<u32> = live.iter().map(|s| s.pid).collect();
 
-        for mut s in live {
+        for mut s in live.into_iter().filter(|s| !is_temp_cwd(&s.cwd)) {
             s.killed = false;
             s.exited = false;
             s.seen_live = true;
@@ -108,6 +111,10 @@ impl KilledTracker {
 
         let now = SystemTime::now();
         self.tracked.retain(|sid, s| {
+            if is_temp_cwd(&s.cwd) {
+                changed = true;
+                return false;
+            }
             if live_ids.contains(sid) {
                 return true;
             }
@@ -182,6 +189,14 @@ fn default_path() -> PathBuf {
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".cache"))
         .join("abtop")
         .join("claude_sessions.json")
+}
+
+/// True for throwaway sessions run under `/tmp` (`/private/tmp` on macOS).
+fn is_temp_cwd(cwd: &str) -> bool {
+    ["/tmp", "/private/tmp"].iter().any(|root| {
+        cwd.strip_prefix(root)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
 }
 
 fn modified_within(path: &Path, now: SystemTime, window: Duration) -> bool {
@@ -324,7 +339,7 @@ mod tests {
         TrackedSession {
             session_id: sid.to_string(),
             pid,
-            cwd: "/tmp/proj".to_string(),
+            cwd: "/home/u/proj".to_string(),
             started_at: 1,
             transcript: transcript.to_path_buf(),
             killed: false,
@@ -462,6 +477,25 @@ mod tests {
         let mut t = KilledTracker::with_path(Some(store));
         t.update(vec![rec("other", 10, &tp)]);
         assert!(t.killed().is_empty());
+    }
+
+    #[test]
+    fn temp_dir_sessions_are_not_tracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let tp = write(dir.path(), "k.jsonl", MID_TURN_TAIL);
+        let mut tmp = rec("t", 10, &tp);
+        tmp.cwd = "/private/tmp/scratch".to_string();
+        let mut tmp_root = rec("r", 11, &tp);
+        tmp_root.cwd = "/tmp".to_string();
+        let mut look_alike = rec("l", 12, &tp);
+        look_alike.cwd = "/tmpfoo/proj".to_string();
+        let mut t = KilledTracker::with_path(None);
+        t.update(vec![tmp, tmp_root, look_alike]);
+        t.update(Vec::new());
+        let stopped: Vec<String> = t.killed().into_iter().map(|s| s.session_id).collect();
+        assert_eq!(stopped, vec!["l".to_string()]);
+        assert!(is_temp_cwd("/tmp/a"));
+        assert!(!is_temp_cwd("/Users/me/tmp"));
     }
 
     #[test]
