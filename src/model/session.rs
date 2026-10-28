@@ -70,6 +70,8 @@ pub enum SessionStatus {
     RateLimited,
     /// Session finished
     Done,
+    /// Process vanished without a clean `/exit` (crash, kill, reboot)
+    Killed,
 }
 
 impl SessionStatus {
@@ -269,6 +271,9 @@ pub struct SessionFile {
     pub cwd: String,
     #[serde(rename = "startedAt")]
     pub started_at: u64,
+    /// `"interactive"` for terminal sessions; empty on older Claude versions.
+    #[serde(default)]
+    pub kind: String,
 }
 
 impl SessionFile {

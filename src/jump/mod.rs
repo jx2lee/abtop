@@ -79,6 +79,20 @@ pub fn run_jump(pid: u32) -> JumpOutcome {
     resolve(&jumpers(), pid)
 }
 
+/// Command that reopens a stopped Claude session; the session id follows it.
+/// Permission bypass stays opt-in: the flag only makes it selectable in Claude.
+pub const CLAUDE_RESUME: &str = "claude --allow-dangerously-skip-permissions --resume";
+
+/// Bring a dead Claude session back with `CLAUDE_RESUME` in a new tmux
+/// session. `NoOp` outside tmux, so the caller can fall back to a hint.
+pub fn run_resume(cwd: &str, session_id: &str) -> JumpOutcome {
+    match tmux::resume_claude(cwd, session_id) {
+        JumpAttempt::NotApplicable => JumpOutcome::NoOp,
+        JumpAttempt::Jumped => JumpOutcome::Jumped,
+        JumpAttempt::Failed(msg) => JumpOutcome::Failed(format!("tmux: {msg}")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared parsing helpers (pure — unit-tested below).
 // ---------------------------------------------------------------------------

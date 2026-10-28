@@ -327,7 +327,7 @@ pub(crate) fn map_pid_to_rollouts_with_timeout_and_pid_slot(
                     }
                     let _ = Command::new("kill")
                         .args(["-9", &child_pid.to_string()])
-                        .status();
+                        .output();
                     let _ = child.wait();
                     return None;
                 }
@@ -346,7 +346,7 @@ pub(crate) fn map_pid_to_rollouts_with_timeout_and_pid_slot(
 #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 fn kill_pid(pid: u32) {
     if pid != 0 {
-        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
     }
 }
 

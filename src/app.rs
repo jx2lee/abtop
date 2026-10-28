@@ -113,6 +113,8 @@ pub struct App {
     pub status_msg: Option<(String, Instant)>,
     /// Kill confirmation: (selected_index, timestamp). Expires after 2s.
     kill_confirm: Option<(usize, Instant)>,
+    /// Pending Enter-to-resume confirmation for a Killed row: (selected index, timestamp)
+    resume_confirm: Option<(usize, Instant)>,
     pub theme: Theme,
     pub show_context: bool,
     pub show_quota: bool,
@@ -131,6 +133,9 @@ pub struct App {
     /// When true (default), mcp-server-owned rollouts are hidden from
     /// the sessions panel. Toggle with Shift+M.
     pub mcp_suppress_sessions: bool,
+    /// When true, Claude sessions that are no longer running are listed as
+    /// Stop. Toggle with Shift+S.
+    pub show_killed: bool,
     pub config_open: bool,
     pub config_selected: usize,
     pub tree_view: bool,
@@ -191,6 +196,7 @@ impl App {
             orphan_ports: Vec::new(),
             status_msg: None,
             kill_confirm: None,
+            resume_confirm: None,
             theme,
             show_context: panels.context,
             show_quota: panels.quota,
@@ -204,6 +210,7 @@ impl App {
             maximized_narrow_section: None,
             mcp_servers: Vec::new(),
             mcp_suppress_sessions: true,
+            show_killed: false,
             config_open: false,
             config_selected: 0,
             tree_view: false,
@@ -262,6 +269,24 @@ impl App {
             "off"
         };
         self.set_status(format!("mcp session suppression: {}", label));
+    }
+
+    /// Toggle listing of stopped sessions (`/exit`, crashed, killed, or lost
+    /// to a reboot). Re-collects so the change shows immediately.
+    pub fn toggle_show_killed(&mut self) {
+        self.show_killed = !self.show_killed;
+        self.tick();
+        let killed = self
+            .sessions
+            .iter()
+            .filter(|s| matches!(s.status, SessionStatus::Killed))
+            .count();
+        let msg = if self.show_killed {
+            format!("stopped sessions: shown ({})", killed)
+        } else {
+            "stopped sessions: hidden".to_string()
+        };
+        self.set_status(msg);
     }
 
     fn persist_panel_visibility(&mut self) {
@@ -514,6 +539,7 @@ impl App {
     /// spawn subprocesses or consume the user's Claude quota.
     pub fn tick_no_summaries(&mut self) {
         self.collector.set_mcp_suppress(self.mcp_suppress_sessions);
+        self.collector.set_show_killed(self.show_killed);
         self.sessions = self.collector.collect();
         self.orphan_ports = self.collector.orphan_ports.clone();
         self.mcp_servers = self.collector.mcp_servers.clone();
@@ -581,6 +607,10 @@ impl App {
 
         // Spawn summary jobs for sessions that need one
         for s in &self.sessions {
+            if matches!(s.status, SessionStatus::Killed) {
+                // Not worth a `claude --print` call; the prompt fallback is shown.
+                continue;
+            }
             let retries = self
                 .summary_retries
                 .get(&s.session_id)
@@ -618,7 +648,8 @@ impl App {
     /// True if any session still qualifies for a summary retry.
     pub fn has_retryable_summaries(&self) -> bool {
         self.sessions.iter().any(|s| {
-            (!s.initial_prompt.is_empty() || !s.first_assistant_text.is_empty())
+            !matches!(s.status, SessionStatus::Killed)
+                && (!s.initial_prompt.is_empty() || !s.first_assistant_text.is_empty())
                 && !self.summaries.contains_key(&s.session_id)
                 && !self.pending_summaries.contains(&s.session_id)
                 && self
@@ -719,6 +750,10 @@ impl App {
             return;
         }
         let session = &self.sessions[self.selected];
+        if matches!(session.status, SessionStatus::Killed) {
+            self.dismiss_selected_killed();
+            return;
+        }
         if matches!(session.status, SessionStatus::Done | SessionStatus::Unknown) {
             return;
         }
@@ -757,6 +792,29 @@ impl App {
             .unwrap_or_else(|| format!("PID {}", session.pid));
         self.kill_confirm = Some((self.selected, Instant::now()));
         self.set_status(format!("Press x again to kill: {}", name));
+    }
+
+    /// Remove the selected Killed session from the list (press `x` twice).
+    /// Only abtop's record is dropped; the transcript stays on disk.
+    fn dismiss_selected_killed(&mut self) {
+        if let Some((idx, ts)) = self.kill_confirm.take() {
+            if idx == self.selected && ts.elapsed().as_secs() < 2 {
+                let sid = self.sessions[self.selected].session_id.clone();
+                if self.collector.forget_killed(&sid) {
+                    self.set_status(format!("dismissed stopped session {}", sid));
+                }
+                self.tick();
+                return;
+            }
+        }
+        let session = &self.sessions[self.selected];
+        let name = self
+            .summaries
+            .get(&session.session_id)
+            .cloned()
+            .unwrap_or_else(|| session.session_id.clone());
+        self.kill_confirm = Some((self.selected, Instant::now()));
+        self.set_status(format!("Press x again to dismiss: {}", name));
     }
 
     /// Kill all orphan port processes (Shift+X).
@@ -805,8 +863,43 @@ impl App {
         if self.sessions.is_empty() {
             return JumpOutcome::NoOp;
         }
-        let target_pid = self.sessions[self.selected].pid;
+        let session = &self.sessions[self.selected];
+        if matches!(session.status, SessionStatus::Killed) {
+            return self.resume_selected_killed();
+        }
+        let target_pid = session.pid;
         crate::jump::run_jump(target_pid)
+    }
+
+    /// Enter on a Killed row: no terminal is left to focus, so reopen it with
+    /// `claude --resume` in a new tmux session (press Enter twice, so one stray
+    /// press cannot spawn a duplicate). Outside tmux, show the command instead.
+    fn resume_selected_killed(&mut self) -> JumpOutcome {
+        let session = &self.sessions[self.selected];
+        let (cwd, sid) = (session.cwd.clone(), session.session_id.clone());
+        let hint = format!("resume: cd {} && {} {}", cwd, crate::jump::CLAUDE_RESUME, sid);
+        if std::env::var("TMUX").is_err() {
+            return JumpOutcome::Failed(hint);
+        }
+        if let Some((idx, ts)) = self.resume_confirm.take() {
+            if idx == self.selected && ts.elapsed().as_secs() < 2 {
+                return match crate::jump::run_resume(&cwd, &sid) {
+                    JumpOutcome::NoOp => JumpOutcome::Failed(hint),
+                    outcome => outcome,
+                };
+            }
+        }
+        let name = self
+            .summaries
+            .get(&sid)
+            .cloned()
+            .unwrap_or_else(|| sid.clone());
+        self.resume_confirm = Some((self.selected, Instant::now()));
+        self.set_status(format!(
+            "Press Enter again to resume in a new tmux session: {}",
+            name
+        ));
+        JumpOutcome::NoOp
     }
 
     /// Summary column text: the session name when toggled on and set,
@@ -825,7 +918,7 @@ impl App {
     pub fn session_summary(&self, session: &AgentSession) -> String {
         if let Some(summary) = self.summaries.get(&session.session_id) {
             summary.clone()
-        } else if matches!(session.status, SessionStatus::Done) {
+        } else if matches!(session.status, SessionStatus::Done | SessionStatus::Killed) {
             // Done sessions: don't wait for pending summary, show fallback immediately
             if !session.initial_prompt.is_empty() {
                 sanitize_fallback(&session.initial_prompt, 80)
@@ -916,7 +1009,7 @@ fn generate_summary(prompt: &str, assistant_text: &str) -> Option<String> {
             // Timeout or disconnected — kill the child so the helper thread can exit.
             let _ = std::process::Command::new("kill")
                 .args(["-9", &child_pid.to_string()])
-                .status();
+                .output();
             return None;
         }
     };

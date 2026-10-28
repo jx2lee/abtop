@@ -336,6 +336,7 @@ mod tests {
             (SessionStatus::Unknown, "\"Unknown\""),
             (SessionStatus::RateLimited, "\"RateLimited\""),
             (SessionStatus::Done, "\"Done\""),
+            (SessionStatus::Killed, "\"Killed\""),
         ] {
             assert_eq!(serde_json::to_string(&status).unwrap(), wire);
         }
