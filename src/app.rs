@@ -133,8 +133,8 @@ pub struct App {
     /// When true (default), mcp-server-owned rollouts are hidden from
     /// the sessions panel. Toggle with Shift+M.
     pub mcp_suppress_sessions: bool,
-    /// When true, sessions that vanished without `/exit` are listed as
-    /// Killed. Toggle with Shift+K.
+    /// When true, Claude sessions that are no longer running are listed as
+    /// Stop. Toggle with Shift+S.
     pub show_killed: bool,
     pub config_open: bool,
     pub config_selected: usize,
@@ -271,8 +271,8 @@ impl App {
         self.set_status(format!("mcp session suppression: {}", label));
     }
 
-    /// Toggle listing of Killed sessions (crashed, killed, or lost to a
-    /// reboot without `/exit`). Re-collects so the change shows immediately.
+    /// Toggle listing of stopped sessions (`/exit`, crashed, killed, or lost
+    /// to a reboot). Re-collects so the change shows immediately.
     pub fn toggle_show_killed(&mut self) {
         self.show_killed = !self.show_killed;
         self.tick();
@@ -282,9 +282,9 @@ impl App {
             .filter(|s| matches!(s.status, SessionStatus::Killed))
             .count();
         let msg = if self.show_killed {
-            format!("killed sessions: shown ({})", killed)
+            format!("stopped sessions: shown ({})", killed)
         } else {
-            "killed sessions: hidden".to_string()
+            "stopped sessions: hidden".to_string()
         };
         self.set_status(msg);
     }
@@ -801,7 +801,7 @@ impl App {
             if idx == self.selected && ts.elapsed().as_secs() < 2 {
                 let sid = self.sessions[self.selected].session_id.clone();
                 if self.collector.forget_killed(&sid) {
-                    self.set_status(format!("dismissed killed session {}", sid));
+                    self.set_status(format!("dismissed stopped session {}", sid));
                 }
                 self.tick();
                 return;

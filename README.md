@@ -152,26 +152,28 @@ When `language` is unset, abtop auto-detects from `LANG` — any value starting 
 | `Enter`            | Jump to session terminal             |
 | `x`                | Kill selected session                |
 | `X`                | Kill all orphan ports                |
-| `K`                | Show/hide killed Claude sessions     |
+| `S`                | Show/hide stopped Claude sessions    |
 | `t`                | Cycle theme                          |
 | `1`–`5`            | Toggle panel visibility              |
 | `Esc`              | Open/close config page               |
 | `q`                | Quit                                 |
 | `r`                | Force refresh                        |
 
-### Killed Sessions
+### Stopped Sessions
 
-When a reboot, `tmux kill-server`, or a crash takes down running Claude Code
-sessions, abtop remembers them. Press `K` to list sessions that ended without
-`/exit` as `✗ Killed`. On a Killed row, `Enter` (twice) runs
+abtop remembers Claude Code sessions after they stop, whether they ended with
+`/exit` or were taken down by a reboot, `tmux kill-server`, or a crash. Press
+`S` to list them as `■ Stop`; the task column says `exited` or `killed`. On a
+Stop row, `Enter` (twice) runs
 `claude --resume <id>` in a new tmux window when abtop runs inside tmux, and
 otherwise shows that command. `x` (twice) dismisses the row.
 
 abtop records live sessions in `~/.cache/abtop/claude_sessions.json`
 (`~/Library/Caches/abtop/` on macOS), so it can only report sessions it saw
 running. Keep it open, or run it once after starting your sessions. Exits that
-leave no trace (Ctrl+C, Ctrl+D) also show up as Killed. Records are dropped 7
-days after the transcript last changed.
+leave no trace (Ctrl+C, Ctrl+D) show up as `killed`. Records are dropped 30
+days after the transcript last changed, matching Claude Code's default
+transcript cleanup.
 
 ## Library / JSON snapshot
 

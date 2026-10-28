@@ -225,10 +225,10 @@ File format read by abtop:
 ◌ Waiting  = PID alive + transcript mtime > 30s ago
 ✗ Error    = PID alive + last assistant has error content
 ✓ Done     = PID dead (detected via kill(pid, 0) failure)
-✗ Killed   = Claude session abtop saw alive is gone without `/exit` (hidden until `K`)
+■ Stop     = Claude session abtop saw alive is no longer running (hidden until `S`)
 ```
 
-**Killed detection** (`collector/killed.rs`): every live interactive Claude session is persisted to `{cache_dir}/abtop/claude_sessions.json`. When a tracked session disappears, it is dropped if its last `history.jsonl` entry (or, on older Claude Code, its last transcript turn) is `/exit` or `/quit`, or if the same PID now runs another sid (`/clear`); otherwise it becomes Killed. Killed rows use PID 0 because the old PID may be reused. Resuming the sid (`claude --resume`) makes it live again. Records are pruned 7 days after the transcript's mtime.
+**Killed detection** (`collector/killed.rs`): every live interactive Claude session is persisted to `{cache_dir}/abtop/claude_sessions.json`. When a tracked session disappears, it is dropped if the same PID now runs another sid (`/clear`); otherwise it becomes Stop (`SessionStatus::Killed` internally). A last `history.jsonl` entry (or, on older Claude Code, last transcript turn) of `/exit` or `/quit` sets `exited`, shown as `exited` instead of `killed` in the task column. Stop rows use PID 0 because the old PID may be reused. Resuming the sid (`claude --resume`) makes it live again. Records are pruned 30 days after the transcript's mtime (Claude Code's default `cleanupPeriodDays`).
 
 **Done detection**: session files are deleted on normal exit, but may linger briefly or survive crashes. When PID is dead but file exists, show as Done and clean up on next tick.
 
@@ -278,8 +278,8 @@ Tracks child processes that have open ports. When a parent session dies but the 
 |-----|--------|
 | `↑`/`↓` or `k`/`j` | Select session in list |
 | `Enter` | Jump to session terminal (cmux / tmux / iTerm2) |
-| `x` | Kill selected session (SIGKILL); on a Killed row, dismiss it |
-| `K` | Show/hide Killed Claude sessions (`Enter` twice on one resumes it in a new tmux window, or shows the command outside tmux) |
+| `x` | Kill selected session (SIGKILL); on a Stop row, dismiss it |
+| `S` | Show/hide stopped Claude sessions (`Enter` twice on one resumes it in a new tmux window, or shows the command outside tmux) |
 | `X` | Kill all orphan ports |
 | `q` | Quit |
 | `r` | Force refresh |

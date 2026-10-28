@@ -309,7 +309,7 @@ pub struct MultiCollector {
     /// behavior (mcp-server PIDs and their rollouts appear there too,
     /// with the existing 1-of-N HashMap-overwrite caveat).
     pub mcp_suppress: bool,
-    /// Whether Killed sessions are returned from `collect` (toggle: Shift+K).
+    /// Whether Killed sessions are returned from `collect` (toggle: Shift+S).
     pub show_killed: bool,
     desktop_rollout_scanner: DesktopRolloutScanner,
 }
@@ -461,7 +461,7 @@ impl MultiCollector {
         }
 
         // Hide dead sessions: Codex uses pid==0 sentinel, Claude is filtered in collect().
-        // Killed sessions are only listed while the Shift+K toggle is on.
+        // Killed sessions are only listed while the Shift+S toggle is on.
         let show_killed = self.show_killed;
         all.retain(|s| match s.status {
             SessionStatus::Done => false,

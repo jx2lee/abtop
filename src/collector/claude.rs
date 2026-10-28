@@ -200,6 +200,7 @@ impl ClaudeCollector {
                     started_at: s.started_at,
                     transcript: transcript.clone(),
                     killed: false,
+                    exited: false,
                     seen_live: true,
                 })
             })
@@ -282,7 +283,11 @@ impl ClaudeCollector {
             total_cache_read: t.total_cache_read,
             total_cache_create: t.total_cache_create,
             turn_count: t.turn_count,
-            current_tasks: vec![format!("killed · last active {} ago", format_ago(ago))],
+            current_tasks: vec![format!(
+                "{} · last active {} ago",
+                if rec.exited { "exited" } else { "killed" },
+                format_ago(ago)
+            )],
             mem_mb: 0,
             version: t.version.clone(),
             git_branch: t.git_branch.clone(),

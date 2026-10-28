@@ -1,16 +1,14 @@
-//! Tracks Claude Code sessions that disappeared without a clean `/exit`:
-//! crashes, SIGKILL, `tmux kill-server`, or a reboot.
+//! Tracks Claude Code sessions that are no longer running, so they can be
+//! listed as Stop and resumed later: `/exit`, crashes, SIGKILL,
+//! `tmux kill-server`, or a reboot.
 //!
 //! Every live session is remembered in `~/.cache/abtop/claude_sessions.json`
 //! so the record survives abtop restarts and reboots. When a remembered
 //! session is no longer running, abtop looks for the user's `/exit` (or
 //! `/quit`): first as the session's last entry in `{config-root}/history.jsonl`
 //! (current Claude Code), then as the last turn of the transcript (older
-//! versions). If found, the record is dropped; otherwise it is marked Killed
-//! so it can be found and resumed later.
-//!
-//! Exits that leave no trace (Ctrl+C / Ctrl+D) are indistinguishable from a
-//! kill and show up as Killed; `x` dismisses them.
+//! versions). Either way the record is marked stopped; a clean exit is
+//! remembered as `exited` so the row can say so. `x` dismisses a row.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -19,8 +17,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-/// Killed sessions whose transcript has not changed for this long are forgotten.
-const KILLED_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Stopped sessions whose transcript has not changed for this long are
+/// forgotten. Matches Claude Code's default `cleanupPeriodDays` (30), after
+/// which the transcript is gone and `claude --resume` no longer works.
+const KILLED_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// Bytes read from the end of a transcript when looking for a trailing `/exit`.
 const TAIL_BYTES: u64 = 64 * 1024;
 /// Bytes read from the end of `history.jsonl`, which is shared by all sessions.
@@ -35,6 +35,9 @@ pub(crate) struct TrackedSession {
     pub transcript: PathBuf,
     #[serde(default)]
     pub killed: bool,
+    /// Stopped with `/exit` or `/quit` rather than crashed or killed.
+    #[serde(default)]
+    pub exited: bool,
     /// Seen alive during this abtop run. PID-based checks are only trusted
     /// for these: PIDs loaded from disk may have been reused after a reboot.
     #[serde(skip)]
@@ -95,6 +98,7 @@ impl KilledTracker {
 
         for mut s in live {
             s.killed = false;
+            s.exited = false;
             s.seen_live = true;
             if self.tracked.get(&s.session_id) != Some(&s) {
                 self.tracked.insert(s.session_id.clone(), s);
@@ -111,9 +115,10 @@ impl KilledTracker {
                 changed = true;
                 // Same process now runs another sid: `/clear` rotated it.
                 let rotated = s.seen_live && live_pids.contains(&s.pid);
-                if rotated || ended_cleanly(s) {
+                if rotated {
                     return false;
                 }
+                s.exited = ended_cleanly(s);
                 s.killed = true;
             }
             let keep = modified_within(&s.transcript, now, KILLED_RETENTION);
@@ -323,6 +328,7 @@ mod tests {
             started_at: 1,
             transcript: transcript.to_path_buf(),
             killed: false,
+            exited: false,
             seen_live: false,
         }
     }
@@ -385,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn vanished_session_is_killed_unless_exited() {
+    fn vanished_session_is_stopped_and_exit_is_remembered() {
         let dir = tempfile::tempdir().unwrap();
         let killed_tp = write(dir.path(), "k.jsonl", MID_TURN_TAIL);
         let exited_tp = write(dir.path(), "e.jsonl", EXIT_TAIL);
@@ -394,8 +400,20 @@ mod tests {
         assert!(t.killed().is_empty());
 
         t.update(Vec::new());
-        let killed: Vec<String> = t.killed().into_iter().map(|s| s.session_id).collect();
-        assert_eq!(killed, vec!["k".to_string()]);
+        let mut stopped: Vec<(String, bool)> = t
+            .killed()
+            .into_iter()
+            .map(|s| (s.session_id, s.exited))
+            .collect();
+        stopped.sort();
+        assert_eq!(
+            stopped,
+            vec![("e".to_string(), true), ("k".to_string(), false)]
+        );
+
+        // Resuming an exited session clears the flag.
+        t.update(vec![rec("e", 12, &exited_tp)]);
+        assert_eq!(t.killed().len(), 1);
     }
 
     #[test]
