@@ -130,7 +130,32 @@ impl CodexCollector {
         let codex_pids =
             Self::find_codex_pids_from_shared(&shared.process_info, &shared.mcp_server_pids);
         let just_pids: Vec<u32> = codex_pids.iter().map(|(p, _)| *p).collect();
-        let pid_to_jsonl = Self::map_pid_to_jsonl(&just_pids, &self.sessions_dir);
+        let mut pid_to_jsonl = Self::map_pid_to_jsonl(&just_pids, &self.sessions_dir);
+        let unmapped: Vec<u32> = just_pids
+            .iter()
+            .copied()
+            .filter(|pid| !pid_to_jsonl.contains_key(pid))
+            .collect();
+        if !unmapped.is_empty() {
+            let daemon_pids: Vec<u32> = Self::find_codex_desktop_pids_from_shared(
+                &shared.process_info,
+                &shared.mcp_server_pids,
+            )
+            .into_iter()
+            .filter(|d| {
+                unmapped
+                    .iter()
+                    .any(|cli| process::is_descendant_of(*d, *cli, &shared.process_info))
+            })
+            .collect();
+            let daemon_rollouts = super::mcp::map_pid_to_rollouts(&daemon_pids);
+            pid_to_jsonl.extend(Self::attribute_daemon_rollouts(
+                &unmapped,
+                &pid_to_jsonl,
+                &daemon_rollouts,
+                &shared.process_info,
+            ));
+        }
         let pid_is_exec: HashMap<u32, bool> = codex_pids.into_iter().collect();
 
         let mut sessions = Vec::new();
@@ -718,6 +743,43 @@ impl CodexCollector {
         });
 
         pids
+    }
+
+    /// Newer Codex CLIs (~0.16x) spawn a managed `app-server` child that holds
+    /// the rollout fd, so the TUI PID itself has none open. Give each such TUI
+    /// the newest rollout held by an app-server descending from it, never
+    /// reusing a rollout another PID already owns.
+    fn attribute_daemon_rollouts(
+        unmapped_cli_pids: &[u32],
+        mapped: &HashMap<u32, PathBuf>,
+        daemon_rollouts: &HashMap<u32, Vec<PathBuf>>,
+        process_info: &HashMap<u32, ProcInfo>,
+    ) -> Vec<(u32, PathBuf)> {
+        let mut taken: HashSet<PathBuf> = mapped.values().cloned().collect();
+        let mut out = Vec::new();
+        for &cli in unmapped_cli_pids {
+            let mut candidates: Vec<&PathBuf> = daemon_rollouts
+                .iter()
+                .filter(|(daemon, _)| process::is_descendant_of(**daemon, cli, process_info))
+                .flat_map(|(_, paths)| paths)
+                .filter(|path| !taken.contains(*path))
+                .collect();
+            candidates.sort_by_key(|path| {
+                (
+                    std::cmp::Reverse(
+                        fs::metadata(path)
+                            .and_then(|meta| meta.modified())
+                            .unwrap_or(std::time::UNIX_EPOCH),
+                    ),
+                    (*path).clone(),
+                )
+            });
+            if let Some(path) = candidates.first() {
+                taken.insert((*path).clone());
+                out.push((cli, (*path).clone()));
+            }
+        }
+        out
     }
 
     /// Find Codex Desktop app-server host PIDs. Desktop is kept separate from
@@ -1665,6 +1727,63 @@ mod tests {
             cpu_pct: 0.0,
             command: command.to_string(),
         }
+    }
+
+    #[test]
+    fn managed_daemon_rollout_is_attributed_to_its_tui() {
+        let procs: HashMap<u32, ProcInfo> = [
+            proc_info(100, 1, "codex --dangerously-bypass-approvals-and-sandbox"),
+            proc_info(
+                101,
+                100,
+                "/home/u/.codex/packages/bin/codex app-server --listen unix:// --managed-daemon",
+            ),
+            proc_info(200, 1, "codex"),
+            proc_info(300, 1, "/Applications/Codex.app/codex app-server"),
+        ]
+        .into_iter()
+        .map(|p| (p.pid, p))
+        .collect();
+        let daemon_rollouts: HashMap<u32, Vec<PathBuf>> = [
+            (101, vec![PathBuf::from("/s/rollout-tui.jsonl")]),
+            (300, vec![PathBuf::from("/s/rollout-desktop.jsonl")]),
+        ]
+        .into_iter()
+        .collect();
+
+        let got = CodexCollector::attribute_daemon_rollouts(
+            &[100, 200],
+            &HashMap::new(),
+            &daemon_rollouts,
+            &procs,
+        );
+
+        // Only the TUI's own child counts; the unrelated Desktop app-server
+        // must not lend its rollout to the other TUI (200).
+        assert_eq!(got, vec![(100, PathBuf::from("/s/rollout-tui.jsonl"))]);
+    }
+
+    #[test]
+    fn managed_daemon_rollout_already_owned_is_not_reused() {
+        let procs: HashMap<u32, ProcInfo> = [
+            proc_info(100, 1, "codex"),
+            proc_info(101, 100, "codex app-server --managed-daemon"),
+        ]
+        .into_iter()
+        .map(|p| (p.pid, p))
+        .collect();
+        let path = PathBuf::from("/s/rollout-a.jsonl");
+        let daemon_rollouts: HashMap<u32, Vec<PathBuf>> =
+            [(101, vec![path.clone()])].into_iter().collect();
+        let mapped: HashMap<u32, PathBuf> = [(999, path)].into_iter().collect();
+
+        assert!(CodexCollector::attribute_daemon_rollouts(
+            &[100],
+            &mapped,
+            &daemon_rollouts,
+            &procs
+        )
+        .is_empty());
     }
 
     fn owned_process(pid: u32) -> CodexProcessContext {
