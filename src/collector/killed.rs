@@ -10,8 +10,8 @@
 //! versions). Either way the record is marked stopped; a clean exit is
 //! remembered as `exited` so the row can say so. `x` dismisses a row.
 //!
-//! Sessions run from a temp directory (`/tmp`, `/private/tmp`) are throwaway
-//! and never tracked.
+//! Sessions whose cwd is under one of [`TEMP_CWD_ROOTS`] are throwaway and
+//! never tracked.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -191,9 +191,12 @@ fn default_path() -> PathBuf {
         .join("claude_sessions.json")
 }
 
-/// True for throwaway sessions run under `/tmp` (`/private/tmp` on macOS).
+/// Directories whose sessions are throwaway and never tracked. `/private`
+/// covers macOS's `/private/tmp` and `$TMPDIR` (`/private/var/folders/...`).
+const TEMP_CWD_ROOTS: &[&str] = &["/tmp", "/private"];
+
 fn is_temp_cwd(cwd: &str) -> bool {
-    ["/tmp", "/private/tmp"].iter().any(|root| {
+    TEMP_CWD_ROOTS.iter().any(|root| {
         cwd.strip_prefix(root)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     })
@@ -495,6 +498,8 @@ mod tests {
         let stopped: Vec<String> = t.killed().into_iter().map(|s| s.session_id).collect();
         assert_eq!(stopped, vec!["l".to_string()]);
         assert!(is_temp_cwd("/tmp/a"));
+        assert!(is_temp_cwd("/private/var/folders/x/T/proj"));
+        assert!(!is_temp_cwd("/privatefoo"));
         assert!(!is_temp_cwd("/Users/me/tmp"));
     }
 
