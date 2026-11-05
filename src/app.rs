@@ -111,10 +111,10 @@ pub struct App {
     pub orphan_ports: Vec<OrphanPort>,
     /// Transient status message shown in the footer (auto-clears after 3s).
     pub status_msg: Option<(String, Instant)>,
-    /// Kill confirmation: (selected_index, timestamp). Expires after 2s.
-    kill_confirm: Option<(usize, Instant)>,
-    /// Pending Enter-to-resume confirmation for a Killed row: (selected index, timestamp)
-    resume_confirm: Option<(usize, Instant)>,
+    /// Kill confirmation: (session id, timestamp). Expires after 2s.
+    kill_confirm: Option<(String, Instant)>,
+    /// Pending Enter-to-resume confirmation for a Killed row: (session id, timestamp)
+    resume_confirm: Option<(String, Instant)>,
     pub theme: Theme,
     pub show_context: bool,
     pub show_quota: bool,
@@ -540,7 +540,16 @@ impl App {
     pub fn tick_no_summaries(&mut self) {
         self.collector.set_mcp_suppress(self.mcp_suppress_sessions);
         self.collector.set_show_killed(self.show_killed);
+        let previous = self
+            .sessions
+            .get(self.selected)
+            .map(|s| (s.agent_cli, s.session_id.clone(), s.pid));
         self.sessions = self.collector.collect();
+        if let Some((cli, sid, pid)) = previous {
+            if let Some(index) = find_same_session(&self.sessions, cli, &sid, pid) {
+                self.selected = index;
+            }
+        }
         self.orphan_ports = self.collector.orphan_ports.clone();
         self.mcp_servers = self.collector.mcp_servers.clone();
         self.host_metrics = self.host_sampler.sample();
@@ -759,8 +768,8 @@ impl App {
         }
 
         // Check if we have a pending confirmation for this exact session
-        if let Some((idx, ts)) = self.kill_confirm.take() {
-            if idx == self.selected && ts.elapsed().as_secs() < 2 {
+        if let Some((sid, ts)) = self.kill_confirm.take() {
+            if sid == session.session_id && ts.elapsed().as_secs() < 2 {
                 // Confirmed — verify PID still runs a killable agent before killing
                 let pid = session.pid;
                 let verified = std::process::Command::new("ps")
@@ -790,16 +799,16 @@ impl App {
             .get(&session.session_id)
             .cloned()
             .unwrap_or_else(|| format!("PID {}", session.pid));
-        self.kill_confirm = Some((self.selected, Instant::now()));
+        self.kill_confirm = Some((session.session_id.clone(), Instant::now()));
         self.set_status(format!("Press x again to kill: {}", name));
     }
 
     /// Remove the selected Killed session from the list (press `x` twice).
     /// Only abtop's record is dropped; the transcript stays on disk.
     fn dismiss_selected_killed(&mut self) {
-        if let Some((idx, ts)) = self.kill_confirm.take() {
-            if idx == self.selected && ts.elapsed().as_secs() < 2 {
-                let sid = self.sessions[self.selected].session_id.clone();
+        let selected_sid = self.sessions[self.selected].session_id.clone();
+        if let Some((sid, ts)) = self.kill_confirm.take() {
+            if sid == selected_sid && ts.elapsed().as_secs() < 2 {
                 if self.collector.forget_killed(&sid) {
                     self.set_status(format!("dismissed stopped session {}", sid));
                 }
@@ -807,13 +816,12 @@ impl App {
                 return;
             }
         }
-        let session = &self.sessions[self.selected];
         let name = self
             .summaries
-            .get(&session.session_id)
+            .get(&selected_sid)
             .cloned()
-            .unwrap_or_else(|| session.session_id.clone());
-        self.kill_confirm = Some((self.selected, Instant::now()));
+            .unwrap_or_else(|| selected_sid.clone());
+        self.kill_confirm = Some((selected_sid, Instant::now()));
         self.set_status(format!("Press x again to dismiss: {}", name));
     }
 
@@ -881,8 +889,8 @@ impl App {
         if std::env::var("TMUX").is_err() {
             return JumpOutcome::Failed(hint);
         }
-        if let Some((idx, ts)) = self.resume_confirm.take() {
-            if idx == self.selected && ts.elapsed().as_secs() < 2 {
+        if let Some((confirmed, ts)) = self.resume_confirm.take() {
+            if confirmed == sid && ts.elapsed().as_secs() < 2 {
                 return match crate::jump::run_resume(&cwd, &sid) {
                     JumpOutcome::NoOp => JumpOutcome::Failed(hint),
                     outcome => outcome,
@@ -894,7 +902,7 @@ impl App {
             .get(&sid)
             .cloned()
             .unwrap_or_else(|| sid.clone());
-        self.resume_confirm = Some((self.selected, Instant::now()));
+        self.resume_confirm = Some((sid, Instant::now()));
         self.set_status(format!(
             "Press Enter again to resume in a new tmux session: {}",
             name
@@ -1120,6 +1128,22 @@ fn is_killable_agent_command(cmd: &str) -> bool {
         && !(crate::collector::process::cmd_has_binary(cmd, "codex") && cmd.contains(" app-server"))
 }
 
+/// Where a session sits in a freshly collected list, so the cursor stays on it
+/// when the order changes. Falls back to the PID because `/clear` changes a live
+/// session's id; Killed rows have PID 0 and match by id only.
+fn find_same_session(sessions: &[AgentSession], cli: &str, sid: &str, pid: u32) -> Option<usize> {
+    let same_cli = |s: &AgentSession| s.agent_cli == cli;
+    sessions
+        .iter()
+        .position(|s| same_cli(s) && s.session_id == sid)
+        .or_else(|| {
+            if pid == 0 {
+                return None;
+            }
+            sessions.iter().position(|s| same_cli(s) && s.pid == pid)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1134,6 +1158,7 @@ mod tests {
             cwd: String::new(),
             project_name: String::new(),
             started_at: 0,
+            last_reply_ms: 0,
             status: SessionStatus::Waiting,
             model: String::new(),
             effort: String::new(),
@@ -1180,6 +1205,43 @@ mod tests {
             seven_day_window_minutes: None,
             updated_at: None,
         }
+    }
+
+    fn session(sid: &str, pid: u32) -> AgentSession {
+        let mut s = waiting_session("claude");
+        s.session_id = sid.to_string();
+        s.pid = pid;
+        s
+    }
+
+    #[test]
+    fn selection_follows_session_by_id_then_pid() {
+        let sessions = vec![session("b", 2), session("a", 1), session("killed", 0)];
+        assert_eq!(find_same_session(&sessions, "claude", "a", 1), Some(1));
+        // `/clear` changed the id, the process is the same.
+        assert_eq!(
+            find_same_session(&sessions, "claude", "cleared", 2),
+            Some(0)
+        );
+        assert_eq!(find_same_session(&sessions, "codex", "a", 1), None);
+        // PID 0 must not match another Killed row.
+        assert_eq!(find_same_session(&sessions, "claude", "gone", 0), None);
+    }
+
+    #[test]
+    fn kill_confirmation_does_not_carry_over_to_another_session() {
+        let mut app = App::new_with_config(
+            crate::theme::Theme::default(),
+            &[],
+            crate::config::PanelVisibility::default(),
+        );
+        // PID 0 is never a killable agent, should the check ever pass by mistake.
+        app.sessions = vec![session("first", 0), session("second", 0)];
+        app.kill_selected();
+        app.sessions.swap(0, 1);
+        app.kill_selected();
+        let (sid, _) = app.kill_confirm.as_ref().expect("asks again");
+        assert_eq!(sid, "second");
     }
 
     #[test]

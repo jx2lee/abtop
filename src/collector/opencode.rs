@@ -201,6 +201,7 @@ impl OpenCodeCollector {
                 cwd: ds.directory.clone(),
                 project_name,
                 started_at: ds.time_created,
+                last_reply_ms: ds.last_reply_ms,
                 status,
                 model,
                 effort: String::new(),
@@ -328,7 +329,8 @@ SELECT
   COALESCE(SUM(json_extract(m.data, '$.tokens.input')), 0) as total_input,
   COALESCE(SUM(json_extract(m.data, '$.tokens.output')), 0) as total_output,
   COALESCE(SUM(json_extract(m.data, '$.tokens.cache.read')), 0) as total_cache_read,
-  COALESCE(SUM(json_extract(m.data, '$.tokens.cache.write')), 0) as total_cache_write
+  COALESCE(SUM(json_extract(m.data, '$.tokens.cache.write')), 0) as total_cache_write,
+  COALESCE(MAX(json_extract(m.data, '$.time.completed')), 0) as last_reply_ms
 FROM session s
 LEFT JOIN project p ON s.project_id = p.id
 LEFT JOIN message m ON m.session_id = s.id
@@ -394,6 +396,7 @@ LIMIT {};"#,
                 // time_created and time_updated are in milliseconds since epoch
                 time_created: row["time_created"].as_u64().unwrap_or(0),
                 time_updated: row["time_updated"].as_u64().unwrap_or(0),
+                last_reply_ms: row["last_reply_ms"].as_u64().unwrap_or(0),
                 project_name,
                 turn_count: row["turn_count"].as_u64().unwrap_or(0) as u32,
                 total_input: row["total_input"].as_u64().unwrap_or(0),
@@ -428,6 +431,7 @@ struct DbSession {
     version: String,
     time_created: u64,
     time_updated: u64,
+    last_reply_ms: u64,
     project_name: String,
     turn_count: u32,
     total_input: u64,

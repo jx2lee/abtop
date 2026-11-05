@@ -468,13 +468,7 @@ impl MultiCollector {
             SessionStatus::Killed => show_killed,
             _ => true,
         });
-        // Live sessions first, then Killed ones; newest first within each group.
-        all.sort_by_key(|s| {
-            (
-                matches!(s.status, SessionStatus::Killed),
-                std::cmp::Reverse(s.started_at),
-            )
-        });
+        sort_sessions(&mut all);
 
         // --- Orphan port detection ---
         // 1. Update tracked port children from live sessions
@@ -532,9 +526,68 @@ impl MultiCollector {
     }
 }
 
+/// Live sessions first, then Killed ones; within each group, the most recent
+/// finished answer first. A session with no answer yet ranks by its start time.
+fn sort_sessions(sessions: &mut [AgentSession]) {
+    sessions.sort_by_key(|s| {
+        let recency = if s.last_reply_ms > 0 {
+            s.last_reply_ms
+        } else {
+            s.started_at
+        };
+        (
+            matches!(s.status, SessionStatus::Killed),
+            std::cmp::Reverse(recency),
+        )
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sort_row(
+        id: &str,
+        started_at: u64,
+        last_reply_ms: u64,
+        status: SessionStatus,
+    ) -> AgentSession {
+        let mut app = crate::app::App::new_with_config(
+            crate::theme::Theme::default(),
+            &[],
+            crate::config::PanelVisibility::default(),
+        );
+        crate::demo::populate_demo(&mut app);
+        let mut s = app.sessions.swap_remove(0);
+        s.session_id = id.to_string();
+        s.started_at = started_at;
+        s.last_reply_ms = last_reply_ms;
+        s.status = status;
+        s
+    }
+
+    #[test]
+    fn sort_puts_latest_reply_first_and_killed_last() {
+        let mut sessions = vec![
+            sort_row("old-start-new-reply", 10, 500, SessionStatus::Waiting),
+            sort_row("killed-recent", 90, 900, SessionStatus::Killed),
+            sort_row("new-start-old-reply", 80, 200, SessionStatus::Waiting),
+            sort_row("no-reply-yet", 300, 0, SessionStatus::Waiting),
+            sort_row("killed-old", 95, 100, SessionStatus::Killed),
+        ];
+        sort_sessions(&mut sessions);
+        let order: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "old-start-new-reply",
+                "no-reply-yet",
+                "new-start-old-reply",
+                "killed-recent",
+                "killed-old",
+            ]
+        );
+    }
 
     #[test]
     fn with_hidden_empty_keeps_all_collectors() {

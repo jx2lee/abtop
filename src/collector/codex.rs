@@ -718,6 +718,7 @@ impl CodexCollector {
                 cwd: result.cwd,
                 project_name,
                 started_at: result.started_at,
+                last_reply_ms: result.last_reply_ms,
                 status,
                 model: result.model,
                 effort: result.effort,
@@ -1018,6 +1019,8 @@ struct CodexJSONLResult {
     tool_calls: Vec<ToolCall>,
     /// Earliest start timestamp among currently open tool calls.
     pending_since_ms: u64,
+    /// Timestamp (epoch ms) of the latest finished answer.
+    last_reply_ms: u64,
     /// True when an open tool call is explicitly waiting for the user.
     waiting_for_user: bool,
     /// Timestamp when the current model-thinking segment began.
@@ -1111,6 +1114,7 @@ fn handle_item_completed(payload: &Value, ts: u64, result: &mut CodexJSONLResult
             // completion with final_answer even without a task_complete event.
             if item["phase"].as_str() == Some("final_answer") {
                 result.task_complete = true;
+                result.last_reply_ms = result.last_reply_ms.max(ts);
                 result.model_generating = false;
                 result.thinking_since_ms = 0;
             }
@@ -1367,6 +1371,7 @@ fn parse_codex_jsonl(path: &Path) -> Option<CodexJSONLResult> {
         rate_limit: None,
         tool_calls: Vec::new(),
         pending_since_ms: 0,
+        last_reply_ms: 0,
         waiting_for_user: false,
         thinking_since_ms: 0,
         file_accesses: Vec::new(),
@@ -1564,6 +1569,9 @@ fn parse_codex_jsonl(path: &Path) -> Option<CodexJSONLResult> {
                     }
                     Some("task_complete") => {
                         result.task_complete = true;
+                        result.last_reply_ms = result
+                            .last_reply_ms
+                            .max(event_timestamp_ms(&val).unwrap_or(0));
                         result.model_generating = false;
                         result.thinking_since_ms = 0;
                     }
@@ -2951,6 +2959,30 @@ mod tests {
     fn test_parse_codex_empty_returns_none() {
         let file = tempfile::NamedTempFile::new().unwrap();
         assert!(parse_codex_jsonl(file.path()).is_none());
+    }
+
+    #[test]
+    fn last_reply_ignores_progress_messages() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write_lines(
+            &mut file,
+            &[
+                SESSION_META,
+                r#"{"type":"event_msg","timestamp":"2026-08-21T05:45:54Z","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"Text","text":"done"}],"phase":"final_answer"}}}"#,
+                r#"{"type":"event_msg","timestamp":"2026-08-21T05:46:00Z","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"Text","text":"working"}],"phase":"commentary"}}}"#,
+            ],
+        );
+        let result = parse_codex_jsonl(file.path()).unwrap();
+        assert_eq!(result.last_reply_ms, 1_787_291_154_000);
+
+        write_lines(
+            &mut file,
+            &[
+                r#"{"type":"event_msg","timestamp":"2026-08-21T05:47:00Z","payload":{"type":"task_complete"}}"#,
+            ],
+        );
+        let result = parse_codex_jsonl(file.path()).unwrap();
+        assert_eq!(result.last_reply_ms, 1_787_291_220_000);
     }
 
     #[test]

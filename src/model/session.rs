@@ -173,6 +173,9 @@ pub struct AgentSession {
     pub cwd: String,
     pub project_name: String,
     pub started_at: u64,
+    /// When the agent last finished answering (epoch ms). Mid-turn messages and
+    /// tool calls don't count. 0 when unknown or no answer finished yet.
+    pub last_reply_ms: u64,
     pub status: SessionStatus,
     pub model: String,
     /// Reasoning effort setting (Codex CLI only: "minimal" | "low" | "medium" | "high").
@@ -309,6 +312,7 @@ mod tests {
             cwd: String::new(),
             project_name: String::new(),
             started_at: 0,
+            last_reply_ms: 0,
             status: SessionStatus::Waiting,
             model: String::new(),
             effort: String::new(),

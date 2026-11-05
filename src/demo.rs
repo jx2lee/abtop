@@ -29,6 +29,7 @@ pub fn populate_demo(app: &mut App) {
             cwd: "/Users/demo/webshop".into(),
             project_name: "webshop".into(),
             started_at: now - 2 * 3600 * 1000, // 2h ago
+            last_reply_ms: 0,
             status: SessionStatus::Executing,
             model: "claude-opus-4-6".into(),
             effort: String::new(),
@@ -262,6 +263,7 @@ pub fn populate_demo(app: &mut App) {
             cwd: "/Users/demo/ml-pipeline".into(),
             project_name: "ml-pipeline".into(),
             started_at: now - 47 * 60 * 1000, // 47m ago
+            last_reply_ms: 0,
             status: SessionStatus::Waiting,
             model: "claude-sonnet-4-6".into(),
             effort: String::new(),
@@ -321,6 +323,7 @@ pub fn populate_demo(app: &mut App) {
             cwd: "/Users/demo/api-server".into(),
             project_name: "api-server".into(),
             started_at: now - 15 * 60 * 1000, // 15m ago
+            last_reply_ms: 0,
             status: SessionStatus::Executing,
             model: "claude-haiku-4-5".into(),
             effort: String::new(),
@@ -427,6 +430,7 @@ pub fn populate_demo(app: &mut App) {
             cwd: "/Users/demo/data-viz".into(),
             project_name: "data-viz".into(),
             started_at: now - 5 * 60 * 1000, // 5m ago
+            last_reply_ms: 0,
             status: SessionStatus::Thinking,
             model: "gpt-5.4".into(),
             effort: "medium".into(),
@@ -483,6 +487,7 @@ pub fn populate_demo(app: &mut App) {
             cwd: "/Users/demo/infra".into(),
             project_name: "infra".into(),
             started_at: now - 8 * 60 * 1000, // 8m ago
+            last_reply_ms: 0,
             status: SessionStatus::Thinking,
             model: "ollama/qwen3:14b".into(),
             effort: String::new(),

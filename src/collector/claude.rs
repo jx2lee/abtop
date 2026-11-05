@@ -274,6 +274,7 @@ impl ClaudeCollector {
                 .unwrap_or("?")
                 .to_string(),
             started_at: rec.started_at,
+            last_reply_ms: t.last_reply_ms,
             status: SessionStatus::Killed,
             model: t.model.clone(),
             effort: String::new(),
@@ -616,6 +617,7 @@ impl ClaudeCollector {
                     if delta.last_activity > prev.last_activity {
                         prev.last_activity = delta.last_activity;
                     }
+                    prev.last_reply_ms = prev.last_reply_ms.max(delta.last_reply_ms);
                     prev.token_history.extend(delta.token_history);
                     if prev.tool_calls.len() < 500 {
                         let remaining = 500 - prev.tool_calls.len();
@@ -685,6 +687,7 @@ impl ClaudeCollector {
             chat_messages: Vec::new(),
             tool_calls: Vec::new(),
             last_assistant_ts_ms: 0,
+            last_reply_ms: 0,
             last_user_ts_ms: 0,
             saw_turn: false,
             file_accesses: Vec::new(),
@@ -868,6 +871,7 @@ impl ClaudeCollector {
             first_assistant_text,
             chat_messages,
             tool_calls,
+            last_reply_ms: cached.last_reply_ms,
             pending_since_ms: cached.last_assistant_ts_ms,
             thinking_since_ms: cached.last_user_ts_ms,
             file_accesses,
@@ -1442,6 +1446,8 @@ struct TranscriptResult {
     tool_calls: Vec<crate::model::ToolCall>,
     /// Timestamp of the last assistant turn (epoch ms), used to compute tool duration.
     last_assistant_ts_ms: u64,
+    /// Timestamp (epoch ms) of the latest assistant line that finished an answer.
+    last_reply_ms: u64,
     /// Timestamp (epoch ms) of the most recent `user` line that has not been
     /// followed by an assistant turn. Zero when the latest entry was an
     /// assistant turn. Mutually exclusive with `last_assistant_ts_ms`.
@@ -1525,6 +1531,7 @@ fn parse_transcript_with_previous(
         chat_messages: Vec::new(),
         tool_calls: Vec::new(),
         last_assistant_ts_ms: 0,
+        last_reply_ms: 0,
         last_user_ts_ms: 0,
         saw_turn: false,
         file_accesses: Vec::new(),
@@ -1780,6 +1787,16 @@ fn parse_transcript_with_previous(
                                             }
                                         }
                                     }
+                                }
+                                // A tool_use stop means the turn is still going, and
+                                // synthetic API errors stop on `stop_sequence`.
+                                if entry_ts_ms > 0
+                                    && matches!(
+                                        val["message"]["stop_reason"].as_str(),
+                                        Some("end_turn" | "max_tokens")
+                                    )
+                                {
+                                    result.last_reply_ms = entry_ts_ms;
                                 }
                                 // Save timestamp for duration calculation — only when
                                 // tool_use is present, so we can detect "tools pending".
@@ -2597,6 +2614,25 @@ mod tests {
             "/compact summary must not reopen the thinking window",
         );
         assert_eq!(result.initial_prompt, "hi");
+    }
+
+    #[test]
+    fn test_parse_transcript_last_reply_is_the_finished_answer() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write_lines(
+            &mut file,
+            &[
+                r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-03-28T15:00:01Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"answer"}]}}"#,
+                r#"{"type":"user","timestamp":"2026-03-28T15:00:02Z","message":{"role":"user","content":"more"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-03-28T15:00:03Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#,
+                r#"{"type":"assistant","timestamp":"2026-03-28T15:00:04Z","message":{"role":"assistant","stop_reason":"stop_sequence","model":"<synthetic>","content":[{"type":"text","text":"API Error"}]}}"#,
+            ],
+        );
+
+        let result = parse_transcript(file.path(), 0);
+
+        assert_eq!(result.last_reply_ms, 1_774_710_001_000);
     }
 
     #[test]
