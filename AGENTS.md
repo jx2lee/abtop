@@ -2,7 +2,7 @@
 
 AI agent monitor for your terminal. Like btop++, but for AI coding agents.
 
-Supports Claude Code, Codex CLI, and OpenCode sessions.
+Supports Claude Code, Codex CLI, OpenCode, and Antigravity CLI (`agy`) sessions.
 
 ## Language Policy
 
@@ -29,6 +29,7 @@ src/
 │   ├── claude.rs           # Claude Code: session discovery, transcript parsing
 │   ├── codex.rs            # Codex CLI: session discovery via ps+lsof, JSONL parsing
 │   ├── opencode.rs         # OpenCode: session discovery via ps + SQLite DB parsing
+│   ├── agy.rs              # Antigravity CLI: presence locks + SQLite run state + JSONL
 │   ├── process.rs          # Child process tree (ps) + open ports (lsof) + git stats
 │   └── rate_limit.rs       # Rate limit file reading (~/.claude/abtop-rate-limits.json)
 └── model/
@@ -76,7 +77,7 @@ Panel rendering priority (top to bottom):
 
 Panel descriptions:
 - **¹context**: Left = token rate braille sparkline (200-point history). Right = per-session context % bars with yellow/red warning.
-- **²quota**: Claude + Codex rate limit gauges side-by-side (5h and 7d windows with reset countdown). Quota is intentionally limited to Claude and Codex; do not add an OpenCode row unless OpenCode exposes a reliable account-level provider rate-limit source.
+- **²quota**: Claude + Codex rate limit gauges side-by-side (5h and 7d windows with reset countdown), plus an AGY column once it has data (`gem` and `3p` weekly gauges). Do not add an OpenCode row unless OpenCode exposes a reliable account-level provider rate-limit source.
 - **³tokens**: Total token breakdown (in/out/cache) + per-turn sparkline for selected session.
 - **projects** (always visible): Per-project git branch + added/modified file counts.
 - **⁴ports**: Agent-spawned open ports + orphan ports (from dead sessions). Conflict detection.
@@ -171,7 +172,15 @@ Rate limits extracted from `token_count` events:
 - Discover running `opencode` processes via shared `ps` data.
 - Read recent sessions from OpenCode's SQLite DB through `sqlite3 -readonly -json`.
 - Match live PIDs to DB sessions by process cwd. OpenCode does not expose a PID/session mapping, so when multiple DB rows share one cwd, only live PIDs should be assigned and older rows should not be shown as live duplicates.
-- OpenCode contributes session/token/project/port data, but not quota data. Quota remains Claude + Codex only.
+- OpenCode contributes session/token/project/port data, but not quota data.
+
+### 4a. Antigravity CLI sessions: `~/.gemini/antigravity-cli/`
+- Discover running `agy` processes via shared `ps` data, then map each PID to its conversation by the `presence/<id>.lock` it holds open (`lsof`, or `/proc/{pid}/fd` on Linux). The lock file outlives the process, so its existence proves nothing. Windows has no equivalent, so agy sessions are not listed there.
+- `conversation_summaries.db` `status` (`CASCADE_RUN_STATUS_RUNNING` / `_IDLE`) tells working from idle.
+- `brain/<id>/.system_generated/logs/transcript.jsonl` holds the steps. A `PLANNER_RESPONSE` with `content` and no `tool_calls` is a finished answer. `created_at` is when a step began, so use the file mtime while the answer is the last step.
+- The context window is not recorded, and the model appears only in the user step that changed it.
+- Quota comes from `agy -p "/usage" --output-format json`, which makes no model request. It runs from the interactive loop only, every 5 minutes while a conversation is live, and is cached in `agy-rate-limits.json`. The two gauges are model families, so agy sessions are never promoted to RateLimited.
+- Stopped conversations use `KilledTracker` with `agy_sessions.json`; `agy -p` runs are not tracked. `history.jsonl` has no conversation id, so a clean exit is read per workspace. Resume with `agy --conversation <id>`, without a permission-bypass flag.
 
 ### 5. Subagents: `~/.claude/projects/{path}/{sessionId}/subagents/`
 - `agent-{hash}.jsonl` — same JSONL format as main transcript

@@ -9,7 +9,7 @@
 //! TUI, and the scroll it causes leaves ratatui's diff out of step with the
 //! screen until restart.
 
-use super::{find_pane_target, is_descendant_of, JumpAttempt, TerminalJumper, CLAUDE_RESUME};
+use super::{find_pane_target, is_descendant_of, JumpAttempt, TerminalJumper};
 use std::process::Command;
 
 pub struct TmuxJumper;
@@ -58,13 +58,13 @@ impl TerminalJumper for TmuxJumper {
     }
 }
 
-/// Reopen a dead Claude session in its own detached tmux session: type
-/// `CLAUDE_RESUME <sid>` into the new session's shell (so the user's PATH and
+/// Reopen a dead session in its own detached tmux session: type
+/// `<resume> <sid>` into the new session's shell (so the user's PATH and
 /// aliases apply and the shell survives the agent exiting), then hand the wait
-/// to the tmux server, which switches this client over once Claude is running.
-/// The wait runs under `run-shell -b`, so it outlives abtop (`--exit-on-jump`).
-/// `NotApplicable` when abtop is not inside tmux.
-pub fn resume_claude(cwd: &str, session_id: &str) -> JumpAttempt {
+/// to the tmux server, which switches this client over once the agent is
+/// running. The wait runs under `run-shell -b`, so it outlives abtop
+/// (`--exit-on-jump`). `NotApplicable` when abtop is not inside tmux.
+pub fn resume_session(agent_cli: &str, resume: &str, cwd: &str, session_id: &str) -> JumpAttempt {
     if std::env::var("TMUX").is_err() {
         return JumpAttempt::NotApplicable;
     }
@@ -73,7 +73,7 @@ pub fn resume_claude(cwd: &str, session_id: &str) -> JumpAttempt {
         return JumpAttempt::Failed(format!("refusing unsafe session id {session_id:?}"));
     }
     let client = tmux_query(&["display-message", "-p", "#{client_tty}"]).unwrap_or_default();
-    let name = free_session_name(session_id);
+    let name = free_session_name(agent_cli, session_id);
     let mut args = vec!["new-session", "-d", "-s", &name, "-P", "-F", "#{pane_id}"];
     if std::path::Path::new(cwd).is_dir() {
         args.extend(["-c", cwd]);
@@ -98,7 +98,7 @@ pub fn resume_claude(cwd: &str, session_id: &str) -> JumpAttempt {
         "#{pane_current_command}",
     ])
     .unwrap_or_default();
-    let cmd = resume_command(session_id);
+    let cmd = resume_command(resume, session_id);
     let typed = Command::new("tmux")
         .args(["send-keys", "-t", &pane, "-l", &cmd])
         .output()
@@ -124,11 +124,11 @@ pub fn resume_claude(cwd: &str, session_id: &str) -> JumpAttempt {
 
 /// Line typed into the new session's shell. The leading `clear` keeps the
 /// command itself off the screen.
-fn resume_command(session_id: &str) -> String {
-    format!("clear; {CLAUDE_RESUME} {session_id}")
+fn resume_command(resume: &str, session_id: &str) -> String {
+    format!("clear; {resume} {session_id}")
 }
 
-/// How long the tmux server waits for Claude to come up before switching anyway.
+/// How long the tmux server waits for the agent to come up before switching anyway.
 const RESUME_WAIT_TICKS: u32 = 75; // × 0.2s = 15s
 
 /// Shell run by the tmux server: poll until the pane runs something other
@@ -159,9 +159,12 @@ fn switch_when_started_script(pane: &str, shell: &str, client: &str, name: &str)
     )
 }
 
-/// `claude-<first 8 chars of sid>`, suffixed `-2`, `-3`, ... if taken.
-fn free_session_name(session_id: &str) -> String {
-    let base = format!("claude-{}", session_id.chars().take(8).collect::<String>());
+/// `<agent>-<first 8 chars of sid>`, suffixed `-2`, `-3`, ... if taken.
+fn free_session_name(agent_cli: &str, session_id: &str) -> String {
+    let base = format!(
+        "{agent_cli}-{}",
+        session_id.chars().take(8).collect::<String>()
+    );
     let taken = |n: &str| {
         Command::new("tmux")
             .args(["has-session", "-t", &format!("={n}")])
@@ -191,12 +194,21 @@ fn is_shell_safe(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jump::{AGY_RESUME, CLAUDE_RESUME};
 
     #[test]
     fn resume_command_allows_skipping_permissions() {
         assert_eq!(
-            resume_command("abcd-1234"),
+            resume_command(CLAUDE_RESUME, "abcd-1234"),
             "clear; claude --allow-dangerously-skip-permissions --resume abcd-1234"
+        );
+    }
+
+    #[test]
+    fn agy_resume_does_not_bypass_permissions() {
+        assert_eq!(
+            resume_command(AGY_RESUME, "abcd-1234"),
+            "clear; agy --conversation abcd-1234"
         );
     }
 

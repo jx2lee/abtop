@@ -531,6 +531,13 @@ impl App {
         self.drain_and_retry_summaries();
     }
 
+    /// Start any background quota refresh that is due. Called from the
+    /// interactive loop only: a one-shot process would exit before the result
+    /// arrives.
+    pub fn refresh_agent_quotas(&mut self) {
+        self.collector.refresh_agent_quotas();
+    }
+
     /// Refresh all monitored data WITHOUT spawning background summary jobs.
     ///
     /// `tick` additionally calls [`App::drain_and_retry_summaries`], which
@@ -880,18 +887,25 @@ impl App {
     }
 
     /// Enter on a Killed row: no terminal is left to focus, so reopen it with
-    /// `claude --resume` in a new tmux session (press Enter twice, so one stray
-    /// press cannot spawn a duplicate). Outside tmux, show the command instead.
+    /// the agent's resume command in a new tmux session (press Enter twice, so
+    /// one stray press cannot spawn a duplicate). Outside tmux, show the command
+    /// instead.
     fn resume_selected_killed(&mut self) -> JumpOutcome {
         let session = &self.sessions[self.selected];
+        let agent_cli = session.agent_cli;
         let (cwd, sid) = (session.cwd.clone(), session.session_id.clone());
-        let hint = format!("resume: cd {} && {} {}", cwd, crate::jump::CLAUDE_RESUME, sid);
+        let hint = format!(
+            "resume: cd {} && {} {}",
+            cwd,
+            crate::jump::resume_command(agent_cli),
+            sid
+        );
         if std::env::var("TMUX").is_err() {
             return JumpOutcome::Failed(hint);
         }
         if let Some((confirmed, ts)) = self.resume_confirm.take() {
             if confirmed == sid && ts.elapsed().as_secs() < 2 {
-                return match crate::jump::run_resume(&cwd, &sid) {
+                return match crate::jump::run_resume(agent_cli, &cwd, &sid) {
                     JumpOutcome::NoOp => JumpOutcome::Failed(hint),
                     outcome => outcome,
                 };
@@ -1106,6 +1120,11 @@ fn promote_waiting_to_rate_limited(sessions: &mut [AgentSession], rate_limits: &
         if s.status != SessionStatus::Waiting {
             continue;
         }
+        // agy's two gauges are per model family, not per session: one running
+        // out says nothing about a session using the other.
+        if s.agent_cli == "agy" {
+            continue;
+        }
         let over = rate_limits.iter().any(|rl| {
             rl.source == s.agent_cli
                 && (rl.five_hour_pct.unwrap_or(0.0) > RATE_LIMITED_PCT
@@ -1121,6 +1140,7 @@ fn is_supported_agent_command(cmd: &str) -> bool {
     crate::collector::process::cmd_has_binary(cmd, "claude")
         || crate::collector::process::cmd_has_binary(cmd, "codex")
         || crate::collector::process::cmd_has_binary(cmd, "opencode")
+        || crate::collector::process::cmd_has_binary(cmd, "agy")
 }
 
 fn is_killable_agent_command(cmd: &str) -> bool {
@@ -1277,6 +1297,7 @@ mod tests {
         assert!(is_supported_agent_command("/usr/local/bin/claude"));
         assert!(is_supported_agent_command("codex --resume abc"));
         assert!(is_supported_agent_command("/opt/homebrew/bin/opencode"));
+        assert!(is_killable_agent_command("agy --conversation abc"));
         assert!(!is_supported_agent_command("node server.js"));
     }
 

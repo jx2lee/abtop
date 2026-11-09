@@ -2,8 +2,8 @@
 
 **Like [btop](https://github.com/aristocratos/btop), but for your AI coding agents.**
 
-See every Claude Code, Codex CLI, and OpenCode session at a glance — token usage, context window %, rate limits, child processes, open ports, and more.
-Claude Code, Codex CLI, and OpenCode sessions are discovered from local process/file state, so multiple active profiles are supported across macOS, Linux, and Windows.
+See every Claude Code, Codex CLI, OpenCode, and Antigravity CLI (`agy`) session at a glance — token usage, context window %, rate limits, child processes, open ports, and more.
+Claude Code, Codex CLI, and OpenCode sessions are discovered from local process/file state, so multiple active profiles are supported across macOS, Linux, and Windows. Antigravity CLI sessions are discovered on macOS and Linux.
 
 ![demo](https://raw.githubusercontent.com/graykode/abtop/main/assets/demo.gif)
 
@@ -77,20 +77,24 @@ tmux new -s work
 
 ## Supported Agents
 
-| Feature           | Claude Code | Codex CLI | OpenCode |
-| ----------------- | :---------: | :-------: | :------: |
-| Session Discovery |     ✅      |    ✅     |    ✅    |
-| Token Tracking    |     ✅      |    ✅     |    ✅    |
-| Context Window %  |     ✅      |    ✅     |    ❌    |
-| Status Detection  |     ✅      |    ✅     |    ✅    |
-| Current Task      |     ✅      |    ✅     |    ❌    |
-| Rate Limit        |     ✅      |    ✅     |    ❌    |
-| Git Status        |     ✅      |    ✅     |    ✅    |
-| Children / Ports  |     ✅      |    ✅     |    ✅    |
-| Subagents         |     ✅      |    ❌     |    ❌    |
-| Memory Status     |     ✅      |    ❌     |    ❌    |
+| Feature           | Claude Code | Codex CLI | OpenCode | Antigravity CLI |
+| ----------------- | :---------: | :-------: | :------: | :-------------: |
+| Session Discovery |     ✅      |    ✅     |    ✅    |       ✅        |
+| Token Tracking    |     ✅      |    ✅     |    ✅    |       ✅        |
+| Context Window %  |     ✅      |    ✅     |    ❌    |       ❌        |
+| Status Detection  |     ✅      |    ✅     |    ✅    |       ✅        |
+| Current Task      |     ✅      |    ✅     |    ❌    |       ✅        |
+| Rate Limit        |     ✅      |    ✅     |    ❌    |       ✅        |
+| Git Status        |     ✅      |    ✅     |    ✅    |       ✅        |
+| Children / Ports  |     ✅      |    ✅     |    ✅    |       ✅        |
+| Subagents         |     ✅      |    ❌     |    ❌    |       ❌        |
+| Memory Status     |     ✅      |    ❌     |    ❌    |       ❌        |
 
 OpenCode support reads the local SQLite database at `~/.local/share/opencode/opencode.db` (also the default location on Windows; `%LOCALAPPDATA%\opencode` and `%APPDATA%\opencode` are probed as fallbacks) and requires `sqlite3` in `PATH` (on Windows: `winget install SQLite.SQLite`).
+
+Antigravity CLI support reads `~/.gemini/antigravity-cli/`. Without `sqlite3` in `PATH`, status falls back to the transcript. `hidden_agents = ["agy"]` hides these sessions.
+
+While an agy conversation is running, the TUI runs `agy -p "/usage"` in the background every 5 minutes. That command asks Google's servers for your quota but makes no model request. The AGY column shows the weekly remainder for Gemini models (`gem`) and for Claude and GPT models (`3p`).
 
 ## Themes
 
@@ -154,7 +158,7 @@ When `language` is unset, abtop auto-detects from `LANG` — any value starting 
 | `Enter`            | Jump to session terminal             |
 | `x`                | Kill selected session                |
 | `X`                | Kill all orphan ports                |
-| `S`                | Show/hide stopped Claude sessions    |
+| `S`                | Show/hide stopped sessions           |
 | `t`                | Cycle theme                          |
 | `1`–`5`            | Toggle panel visibility              |
 | `Esc`              | Open/close config page               |
@@ -178,6 +182,11 @@ running. Keep it open, or run it once after starting your sessions. Exits that
 leave no trace (Ctrl+C, Ctrl+D) show up as `killed`. Records are dropped 30
 days after the transcript last changed, matching Claude Code's default
 transcript cleanup. Sessions run under `/tmp` or `/private` are not listed.
+
+Antigravity CLI conversations work the same way, recorded in
+`agy_sessions.json` in the same directory. `Enter` runs
+`agy --conversation <id>`, which keeps agy's normal permission prompts. One-shot
+`agy -p` runs are not listed. On macOS and Linux only.
 
 ## Library / JSON snapshot
 
@@ -212,7 +221,7 @@ is a reference consumer: a local-first web dashboard built on exactly this API.
 
 ## Privacy
 
-abtop reads local files and local process/open-file metadata only. No API keys, no auth. In the TUI and `--once` output, tool names and file paths are shown, but file contents and prompt text are never displayed. Session summaries are generated via `claude --print`, which makes its own API call — this is the only indirect network usage.
+abtop reads local files and local process/open-file metadata only. No API keys, no auth. In the TUI and `--once` output, tool names and file paths are shown, but file contents and prompt text are never displayed. Session summaries are generated via `claude --print`, which makes its own API call. The agy quota refresh above is the only other indirect network usage.
 
 The JSON snapshot includes richer local dashboard data, including `summary`, `chat_messages`, working directories, config roots, tool-call previews, child process commands, token counts, and port metadata. Chat text is bounded and redacted by the collectors, but it is still derived from local transcripts and may contain sensitive project context. Treat JSON snapshots as local/private data and avoid writing them to shared logs or exposing them on a network without your own access controls.
 

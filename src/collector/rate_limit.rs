@@ -8,6 +8,9 @@ const CLAUDE_RATE_FILE: &str = "abtop-rate-limits.json";
 /// Cached Codex rate limit: ~/.cache/abtop/codex-rate-limits.json
 const CODEX_CACHE_FILE: &str = "codex-rate-limits.json";
 
+/// Cached Antigravity quota: ~/.cache/abtop/agy-rate-limits.json
+const AGY_CACHE_FILE: &str = "agy-rate-limits.json";
+
 #[derive(Debug, Deserialize)]
 struct RateLimitFile {
     #[serde(default)]
@@ -69,17 +72,34 @@ pub fn read_codex_cache() -> Option<RateLimitInfo> {
     read_rate_file(&path, "codex")
 }
 
+/// Read the Antigravity quota written by the last `/usage` refresh.
+pub fn read_agy_cache() -> Option<RateLimitInfo> {
+    let path = agy_cache_path()?;
+    read_rate_file(&path, "agy")
+}
+
 /// Write Codex rate limit to cache file (atomic: write temp + rename).
 pub fn write_codex_cache(info: &RateLimitInfo) {
-    let Some(path) = codex_cache_path() else {
-        return;
-    };
+    if let Some(path) = codex_cache_path() {
+        write_cache(&path, "codex", info);
+    }
+}
+
+/// Write Antigravity quota to cache file (atomic: write temp + rename).
+pub fn write_agy_cache(info: &RateLimitInfo) {
+    if let Some(path) = agy_cache_path() {
+        write_cache(&path, "agy", info);
+    }
+}
+
+fn write_cache(path: &Path, source: &str, info: &RateLimitInfo) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
 
     let json = format!(
-        r#"{{"source":"codex","five_hour":{},"seven_day":{},"updated_at":{}}}"#,
+        r#"{{"source":"{}","five_hour":{},"seven_day":{},"updated_at":{}}}"#,
+        source,
         window_json(
             info.five_hour_pct,
             info.five_hour_resets_at,
@@ -98,7 +118,7 @@ pub fn write_codex_cache(info: &RateLimitInfo) {
     // Atomic write: temp file + rename to avoid corrupted reads
     let tmp = path.with_extension("tmp");
     if std::fs::write(&tmp, &json).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+        let _ = std::fs::rename(&tmp, path);
     }
 }
 
@@ -124,6 +144,10 @@ fn window_json(pct: Option<f64>, resets_at: Option<u64>, window_minutes: Option<
 
 fn codex_cache_path() -> Option<PathBuf> {
     dirs::cache_dir().map(|d| d.join("abtop").join(CODEX_CACHE_FILE))
+}
+
+fn agy_cache_path() -> Option<PathBuf> {
+    dirs::cache_dir().map(|d| d.join("abtop").join(AGY_CACHE_FILE))
 }
 
 fn read_rate_file(path: &Path, default_source: &str) -> Option<RateLimitInfo> {

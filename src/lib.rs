@@ -283,6 +283,7 @@ fn run_app(
         } else if !had_input && last_tick.elapsed() >= tick_interval {
             // Data tick every 2s — skip when handling input to avoid lag
             app.tick();
+            app.refresh_agent_quotas();
             last_tick = std::time::Instant::now();
         }
 

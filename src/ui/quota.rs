@@ -14,7 +14,22 @@ use super::{btop_block_active, fmt_tokens, grad_at, make_gradient, remaining_bar
 const STALE_SECS: u64 = 600;
 
 /// Fixed source order so columns stay stable across runs.
-const SOURCES: &[&str] = &["claude", "codex"];
+const SOURCES: &[&str] = &["claude", "codex", "agy"];
+
+/// Below this column width a bar would push the percentage out of view.
+const COMPACT_COL_W: u16 = 12;
+
+/// Rows for a source's two gauges. agy's gauges are model families sharing a
+/// weekly limit, so a window label could not tell them apart.
+fn gauge_labels(source: &str, rl: &RateLimitInfo) -> (String, String) {
+    if source.eq_ignore_ascii_case("agy") {
+        return ("gem".to_string(), "3p".to_string());
+    }
+    (
+        format_window_label(rl.five_hour_window_minutes, t("quota.5h")),
+        format_window_label(rl.seven_day_window_minutes, t("quota.7d")),
+    )
+}
 
 pub(crate) fn draw_quota_panel(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     draw_quota_panel_active(f, app, area, theme, false);
@@ -46,13 +61,29 @@ pub(crate) fn draw_quota_panel_active(
     let tokens_per_min: f64 = rates.iter().rev().take(ticks_per_min).sum();
 
     // Split into side-by-side columns: one per known source (CLAUDE | CODEX).
-    // Columns are always rendered so the panel layout stays stable even when a
-    // source has no data yet.
-    let num_sources = SOURCES.len() as u16;
+    // Those columns are always rendered so the panel layout stays stable even
+    // when a source has no data yet. AGY joins once it has data, so people who
+    // don't use it keep the wider columns.
+    let has_data = |s: &str| {
+        app.rate_limits
+            .iter()
+            .any(|r| r.source.eq_ignore_ascii_case(s))
+    };
+    let mut sources: Vec<&str> = SOURCES
+        .iter()
+        .copied()
+        .filter(|s| *s != "agy" || has_data(s))
+        .collect();
+    // Three columns leave no room to spare, so a source with nothing to show
+    // gives up its column.
+    if sources.len() == 3 && inner.width / 3 < COMPACT_COL_W {
+        sources.retain(|s| has_data(s));
+    }
+    let num_sources = sources.len() as u16;
     let col_w = inner.width / num_sources;
     let content_h = inner.height.saturating_sub(1); // reserve last row for totals
 
-    for (i, source) in SOURCES.iter().enumerate() {
+    for (i, source) in sources.iter().enumerate() {
         let col_x = inner.x + (i as u16) * col_w;
         let this_w = if i as u16 == num_sources - 1 {
             inner.width - (i as u16) * col_w
@@ -105,7 +136,12 @@ fn draw_source_column(
     theme: &Theme,
 ) {
     let col_w_usize = area.width as usize;
-    let bar_w = col_w_usize.saturating_sub(10).clamp(2, 8);
+    let compact = area.width < COMPACT_COL_W;
+    let bar_w = if compact {
+        0
+    } else {
+        col_w_usize.saturating_sub(10).clamp(2, 8)
+    };
 
     let Some(rl) = rl else {
         let hint = if source.eq_ignore_ascii_case("claude") {
@@ -164,6 +200,7 @@ fn draw_source_column(
     // that the reported `resets_at` is still in the future. Stale sources
     // get the bar (the % is approximately correct) but no countdown row.
     let show_reset = !is_stale;
+    let (first_label, second_label) = gauge_labels(source, rl);
 
     if let Some(used_pct) = rl.five_hour_pct {
         let remaining = (100.0 - used_pct).clamp(0.0, 100.0);
@@ -175,9 +212,8 @@ fn draw_source_column(
             String::new()
         };
         let c = grad_at(cpu_grad, used_pct);
-        let label_5h = format_window_label(rl.five_hour_window_minutes, t("quota.5h"));
         let mut s = vec![styled_label(
-            format!(" {}", label_5h).as_str(),
+            format!(" {}", first_label).as_str(),
             theme.graph_text,
         )];
         s.extend(remaining_bar(remaining, bar_w, cpu_grad, theme.meter_bg));
@@ -190,11 +226,7 @@ fn draw_source_column(
         // when there's nothing meaningful to show (stale source or the
         // cached reset moment is past), render it blank.
         lines.push(Line::from(Span::styled(
-            if reset.is_empty() {
-                String::new()
-            } else {
-                format!("  {}", reset)
-            },
+            reset_row(&reset, compact),
             Style::default().fg(theme.graph_text),
         )));
     }
@@ -208,9 +240,8 @@ fn draw_source_column(
             String::new()
         };
         let c = grad_at(cpu_grad, used_pct);
-        let label_7d = format_window_label(rl.seven_day_window_minutes, t("quota.7d"));
         let mut s = vec![styled_label(
-            format!(" {}", label_7d).as_str(),
+            format!(" {}", second_label).as_str(),
             theme.graph_text,
         )];
         s.extend(remaining_bar(remaining, bar_w, cpu_grad, theme.meter_bg));
@@ -223,16 +254,27 @@ fn draw_source_column(
         // when there's nothing meaningful to show (stale source or the
         // cached reset moment is past), render it blank.
         lines.push(Line::from(Span::styled(
-            if reset.is_empty() {
-                String::new()
-            } else {
-                format!("  {}", reset)
-            },
+            reset_row(&reset, compact),
             Style::default().fg(theme.graph_text),
         )));
     }
 
     f.render_widget(Paragraph::new(lines), area);
+}
+
+/// The countdown row; a compact column drops the indent and the "in".
+fn reset_row(reset: &str, compact: bool) -> String {
+    if reset.is_empty() {
+        String::new()
+    } else if compact {
+        let prefix = t("quota.in");
+        format!(
+            " {}",
+            reset.strip_prefix(prefix.as_str()).unwrap_or(reset).trim()
+        )
+    } else {
+        format!("  {}", reset)
+    }
 }
 
 fn format_window_label(window_minutes: Option<u64>, fallback: String) -> String {
@@ -280,5 +322,60 @@ pub(crate) fn format_reset_time(reset_ts: u64) -> String {
         let d = diff / 86400;
         let h = (diff % 86400) / 3600;
         format!("{} {}{} {}{}", prefix, d, t("time.d"), h, t("time.h"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn limit(source: &str, first_used: f64, second_used: f64) -> RateLimitInfo {
+        RateLimitInfo {
+            source: source.to_string(),
+            five_hour_pct: Some(first_used),
+            seven_day_pct: Some(second_used),
+            ..Default::default()
+        }
+    }
+
+    fn render(width: u16, rate_limits: Vec<RateLimitInfo>) -> String {
+        let mut app = App::new_with_config(Theme::default(), &[], Default::default());
+        app.rate_limits = rate_limits;
+        let mut terminal = Terminal::new(TestBackend::new(width, 9)).unwrap();
+        terminal
+            .draw(|f| draw_quota_panel(f, &app, f.area(), &Theme::default()))
+            .unwrap();
+        format!("{}", terminal.backend())
+    }
+
+    #[test]
+    fn three_narrow_columns_keep_every_percentage_visible() {
+        let text = render(
+            32,
+            vec![
+                limit("claude", 11.0, 33.0),
+                limit("codex", 44.0, 22.0),
+                limit("agy", 1.0, 0.0),
+            ],
+        );
+        for expected in ["CLAUDE", "CODEX", "AGY", "89%", "67%", "56%", "78%", "99%"] {
+            assert!(text.contains(expected), "{expected} missing\n{text}");
+        }
+    }
+
+    #[test]
+    fn narrow_panel_drops_a_source_without_data() {
+        let text = render(32, vec![limit("codex", 44.0, 22.0), limit("agy", 1.0, 0.0)]);
+        assert!(!text.contains("CLAUDE"), "{text}");
+        assert!(text.contains("gem") && text.contains("3p"), "{text}");
+    }
+
+    #[test]
+    fn agy_column_waits_for_data() {
+        let text = render(100, vec![limit("codex", 44.0, 22.0)]);
+        assert!(text.contains("CLAUDE"), "{text}");
+        assert!(!text.contains("AGY"), "{text}");
     }
 }

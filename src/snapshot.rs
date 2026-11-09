@@ -85,7 +85,7 @@ pub struct SubAgentView {
 /// A single session, flattened and curated for JSON consumers.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionView {
-    /// Owning CLI: "claude", "codex", "opencode".
+    /// Owning CLI: "claude", "codex", "opencode", "agy".
     pub agent_cli: &'static str,
     /// Which surface launched this session (CLI / Claude desktop app / IDE
     /// extension); always `Cli` for Codex and OpenCode.

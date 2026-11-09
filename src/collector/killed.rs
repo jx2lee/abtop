@@ -1,6 +1,7 @@
-//! Tracks Claude Code sessions that are no longer running, so they can be
-//! listed as Stop and resumed later: `/exit`, crashes, SIGKILL,
-//! `tmux kill-server`, or a reboot.
+//! Tracks agent sessions that are no longer running, so they can be listed as
+//! Stop and resumed later: `/exit`, crashes, SIGKILL, `tmux kill-server`, or a
+//! reboot. Claude Code is described below; the Antigravity collector keeps its
+//! own store and supplies its own exit check.
 //!
 //! Every live session is remembered in `~/.cache/abtop/claude_sessions.json`
 //! so the record survives abtop restarts and reboots. When a remembered
@@ -27,7 +28,7 @@ const KILLED_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// Bytes read from the end of a transcript when looking for a trailing `/exit`.
 const TAIL_BYTES: u64 = 64 * 1024;
 /// Bytes read from the end of `history.jsonl`, which is shared by all sessions.
-const HISTORY_TAIL_BYTES: u64 = 512 * 1024;
+pub(crate) const HISTORY_TAIL_BYTES: u64 = 512 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct TrackedSession {
@@ -58,11 +59,13 @@ pub(crate) struct KilledTracker {
     path: Option<PathBuf>,
     tracked: HashMap<String, TrackedSession>,
     loaded: bool,
+    /// Whether a vanished session was closed on purpose.
+    exit_check: fn(&TrackedSession) -> bool,
 }
 
 impl KilledTracker {
     pub fn persistent() -> Self {
-        Self::with_path(Some(default_path()))
+        Self::with_path(Some(store_path("claude_sessions.json")))
     }
 
     pub fn with_path(path: Option<PathBuf>) -> Self {
@@ -70,7 +73,13 @@ impl KilledTracker {
             path,
             tracked: HashMap::new(),
             loaded: false,
+            exit_check: ended_cleanly,
         }
+    }
+
+    pub fn with_exit_check(mut self, exit_check: fn(&TrackedSession) -> bool) -> Self {
+        self.exit_check = exit_check;
+        self
     }
 
     fn ensure_loaded(&mut self) {
@@ -110,6 +119,7 @@ impl KilledTracker {
         }
 
         let now = SystemTime::now();
+        let exit_check = self.exit_check;
         self.tracked.retain(|sid, s| {
             if is_temp_cwd(&s.cwd) {
                 changed = true;
@@ -125,7 +135,7 @@ impl KilledTracker {
                 if rotated {
                     return false;
                 }
-                s.exited = ended_cleanly(s);
+                s.exited = exit_check(s);
                 s.killed = true;
             }
             let keep = modified_within(&s.transcript, now, KILLED_RETENTION);
@@ -184,11 +194,11 @@ impl KilledTracker {
     }
 }
 
-fn default_path() -> PathBuf {
+pub(crate) fn store_path(file_name: &str) -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".cache"))
         .join("abtop")
-        .join("claude_sessions.json")
+        .join(file_name)
 }
 
 /// Directories whose sessions are throwaway and never tracked. `/private`
@@ -223,13 +233,13 @@ fn ended_cleanly(s: &TrackedSession) -> bool {
         || transcript_ends_with_exit(&s.transcript)
 }
 
-fn is_exit_command(text: &str) -> bool {
+pub(crate) fn is_exit_command(text: &str) -> bool {
     let cmd = text.trim();
     cmd == "/exit" || cmd == "/quit"
 }
 
 /// Read the last `max_bytes` of a file as complete lines.
-fn tail_lines(path: &Path, max_bytes: u64) -> Option<Vec<String>> {
+pub(crate) fn tail_lines(path: &Path, max_bytes: u64) -> Option<Vec<String>> {
     let mut file = fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     let start = len.saturating_sub(max_bytes);
