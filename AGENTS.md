@@ -103,6 +103,7 @@ Session file format:
 { "pid": 7336, "sessionId": "2f029acc-...", "cwd": "/Users/graykode/abtop", "startedAt": 1774715116826, "kind": "interactive", "entrypoint": "cli" }
 ```
 - ~170 bytes. Created on start, deleted on exit.
+- Files that carry `version` get the new `sessionId` written by `/clear`, before that sid has a transcript. Only files without `version` fall back to the newest transcript in the project dir.
 - Verify PID alive with shared `ps` data containing a `claude` binary.
 - Skip sessions whose PID descends from abtop's own `claude --print` summary children without hiding user-spawned non-interactive sessions.
 

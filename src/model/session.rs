@@ -277,6 +277,9 @@ pub struct SessionFile {
     /// `"interactive"` for terminal sessions; empty on older Claude versions.
     #[serde(default)]
     pub kind: String,
+    /// Claude Code version; empty on files too old to record it.
+    #[serde(default)]
+    pub version: String,
 }
 
 impl SessionFile {

@@ -488,10 +488,14 @@ impl ClaudeCollector {
         // `encode_cwd_path(cwd)`, so locate it via the original sid first.
         let project_dir = resolve_project_dir(config, &sf.cwd, &sf.session_id);
 
-        // `/clear` mints a new sessionId + transcript without rewriting
-        // `sessions/{PID}.json`. Override with the most recent transcript in
-        // the project dir so counters/status track the live session instead
-        // of the stale one. (#68)
+        // Session files that carry `version` get the new sessionId written
+        // by `/clear`, so their sid is authoritative. Guessing there would
+        // hand this PID the transcript of a same-cwd session that just ended.
+        //
+        // Older files keep the initial sessionId after `/clear`. For those,
+        // override with the most recent transcript in the project dir so
+        // counters/status track the live session instead of the stale one.
+        // (#68)
         //
         // Skip the override when multiple active claude PIDs share this
         // cwd: we can't tell which PID owns a freshly-created jsonl, and
@@ -499,7 +503,7 @@ impl ClaudeCollector {
         // exclude sids already claimed by OTHER session files (a sibling
         // PID's transcript must not be adopted as this PID's live sid).
         let siblings = ctx.pids_per_cwd.get(&sf.cwd).copied().unwrap_or(1);
-        if siblings <= 1 {
+        if sf.version.is_empty() && siblings <= 1 {
             let excluded: std::collections::HashSet<&str> = ctx
                 .claimed_sids_by_pid
                 .iter()
@@ -824,10 +828,14 @@ impl ClaudeCollector {
         // Only interactive sessions can be resumed, so only those are tracked
         // for the Killed state; `claude --print` runs never end with `/exit`.
         if sf.kind.is_empty() || sf.kind == "interactive" {
-            if let Some(tp) = &transcript_path {
-                self.live_transcripts
-                    .insert(sf.session_id.clone(), tp.clone());
-            }
+            // After `/clear` the new sid has no transcript until the next
+            // prompt. Track its expected path anyway so the PID stays live
+            // and the previous sid is seen as rotated, not killed.
+            let transcript = transcript_path
+                .clone()
+                .unwrap_or_else(|| project_dir.join(format!("{}.jsonl", sf.session_id)));
+            self.live_transcripts
+                .insert(sf.session_id.clone(), transcript);
         }
 
         // Effort level (persistent `effortLevel` from settings files).
@@ -4045,6 +4053,109 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
         // a stale/empty state. `write_transcript` produces one assistant
         // turn with input_tokens=12 → verify that flowed through.
         assert_eq!(sessions[0].total_input_tokens, 12);
+    }
+
+    fn write_versioned_session_file(path: &Path, pid: u32, session_id: &str, cwd: &Path) {
+        std::fs::write(
+            path,
+            serde_json::json!({
+                "pid": pid,
+                "sessionId": session_id,
+                "cwd": cwd.to_str().unwrap(),
+                "startedAt": 1774715116826u64,
+                "version": "2.1.319",
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_load_session_keeps_sid_of_versioned_session_file() {
+        // A same-cwd session has just ended, so this PID is the only one
+        // left and the ended session's transcript is the newest on disk.
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join(".claude");
+        let sessions = profile.join("sessions");
+        let projects = profile.join("projects");
+        let cwd = temp.path().join("repo");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let pid = 7778;
+        let own_sid = "own-sid";
+        let session_path = sessions.join(format!("{}.json", pid));
+        write_versioned_session_file(&session_path, pid, own_sid, &cwd);
+
+        let own = write_transcript(&projects, &cwd, own_sid, "mine");
+        let ended = write_transcript(&projects, &cwd, "ended-sibling", "theirs");
+        set_mtime(&own, -30);
+        set_mtime(&ended, 0);
+
+        let config = ConfigDir::new(profile.clone());
+        let process_info = make_proc_info(pid, "claude");
+        let mut collector = ClaudeCollector::new();
+        collector.config_dirs = vec![config.clone()];
+
+        let session_paths = vec![(session_path, config)];
+        let ctx = build_discovery_context(&session_paths, &process_info, 0);
+        let loaded = collector.load_session_paths(
+            &session_paths,
+            &process_info,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ctx,
+        );
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].session_id, own_sid);
+    }
+
+    #[test]
+    fn test_clear_before_next_prompt_does_not_mark_previous_sid_killed() {
+        // `/clear` rewrites the session file at once, but the new transcript
+        // only appears with the next prompt. The cwd is outside temp roots
+        // because the tracker ignores sessions run there.
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join(".claude");
+        let sessions_dir = profile.join("sessions");
+        let projects = profile.join("projects");
+        let cwd = Path::new("/work/repo");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&projects).unwrap();
+
+        let pid = 7779;
+        let session_path = sessions_dir.join(format!("{}.json", pid));
+        write_versioned_session_file(&session_path, pid, "before-clear", cwd);
+        write_transcript(&projects, cwd, "before-clear", "first");
+
+        let config = ConfigDir::new(profile.clone());
+        let process_info = make_proc_info(pid, "claude");
+        let mut collector = ClaudeCollector::new();
+        collector.config_dirs = vec![config.clone()];
+        let session_paths = vec![(session_path.clone(), config)];
+
+        let tick = |collector: &mut ClaudeCollector| {
+            let ctx = build_discovery_context(&session_paths, &process_info, 0);
+            let live = collector.load_session_paths(
+                &session_paths,
+                &process_info,
+                &HashMap::new(),
+                &HashMap::new(),
+                &ctx,
+            );
+            let killed = collector.track_killed(&live);
+            (live[0].session_id.clone(), killed.len())
+        };
+
+        assert_eq!(tick(&mut collector), ("before-clear".to_string(), 0));
+
+        write_versioned_session_file(&session_path, pid, "after-clear", cwd);
+        assert_eq!(tick(&mut collector), ("after-clear".to_string(), 0));
+
+        write_transcript(&projects, cwd, "after-clear", "second");
+        assert_eq!(tick(&mut collector), ("after-clear".to_string(), 0));
     }
 
     #[test]
