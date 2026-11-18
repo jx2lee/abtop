@@ -194,11 +194,13 @@ lsof -i -P -n -sTCP:LISTEN         # Open ports
 ```
 - Build parent→children map from ppid
 - Map listening PID → parent agent PID → session
+- The TUI handles keys on the thread that ticks, so slow commands there are input lag. Only the first `lsof` runs inline (one-shot snapshots need ports); later scans run in a background thread and the previous result is served meanwhile.
 
 ### 7. Git status per project
 ```bash
 git -C {cwd} status --porcelain     # added/modified file counts
 ```
+- Run once per distinct cwd of the listed sessions, up to 8 at a time, after hidden (Done, Killed) sessions are filtered out.
 
 ### 8. Memory status
 - Path: `~/.claude/projects/{encoded-path}/memory/`

@@ -167,14 +167,10 @@ pub(crate) fn context_window_for_model(
 }
 
 impl SharedProcessData {
-    /// Fetch process info every tick, but reuse cached ports when `cached_ports` is provided.
-    pub fn fetch(cached_ports: Option<&HashMap<u32, Vec<u16>>>, slow_tick: bool) -> Self {
+    /// Fetch process info. `ports` comes from the [`PortScanner`].
+    pub fn fetch(ports: HashMap<u32, Vec<u16>>, slow_tick: bool) -> Self {
         let process_info = process::get_process_info();
         let children_map = process::get_children_map(&process_info);
-        let ports = match cached_ports {
-            Some(p) => p.clone(),
-            None => process::get_listening_ports(),
-        };
         Self {
             process_info,
             children_map,
@@ -185,6 +181,65 @@ impl SharedProcessData {
             mcp_suppress: true,
             desktop_rollout_fd_map: HashMap::new(),
         }
+    }
+}
+
+type PortScanResult = (Vec<u32>, HashMap<u32, Vec<u16>>);
+
+/// Runs the listening-port scan (`lsof` on macOS, about 250ms) off the UI
+/// thread. The TUI handles keys on the thread that ticks, so an inline scan
+/// on nearly every tick (any new process changes the PID set) is input lag.
+/// The first scan runs inline so one-shot snapshots still list ports; later
+/// ones run in the background while the previous result is served.
+struct PortScanner {
+    cached: HashMap<u32, Vec<u16>>,
+    /// Sorted PID set when the cached scan started.
+    cached_pids: Vec<u32>,
+    scanned_once: bool,
+    in_flight: bool,
+    tx: Sender<PortScanResult>,
+    rx: Receiver<PortScanResult>,
+}
+
+impl PortScanner {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            cached: HashMap::new(),
+            cached_pids: Vec::new(),
+            scanned_once: false,
+            in_flight: false,
+            tx,
+            rx,
+        }
+    }
+
+    /// Ports of live PIDs. `pids` must be sorted. `force` rescans even when
+    /// the PID set has not changed.
+    fn update(&mut self, pids: &[u32], force: bool) -> HashMap<u32, Vec<u16>> {
+        while let Ok((scanned_pids, ports)) = self.rx.try_recv() {
+            self.in_flight = false;
+            self.cached_pids = scanned_pids;
+            self.cached = ports;
+        }
+        if !self.scanned_once {
+            self.scanned_once = true;
+            self.cached_pids = pids.to_vec();
+            self.cached = process::get_listening_ports();
+        } else if !self.in_flight && (force || self.cached_pids != pids) {
+            self.in_flight = true;
+            let pids = pids.to_vec();
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send((pids, process::get_listening_ports()));
+            });
+        }
+        // A PID that exited since the scan no longer owns its ports.
+        self.cached
+            .iter()
+            .filter(|(pid, _)| pids.binary_search(pid).is_ok())
+            .map(|(pid, ports)| (*pid, ports.clone()))
+            .collect()
     }
 }
 
@@ -299,9 +354,7 @@ pub struct MultiCollector {
     collectors: Vec<Box<dyn AgentCollector>>,
     codex_enabled: bool,
     tick_count: u32,
-    cached_ports: HashMap<u32, Vec<u16>>,
-    /// PID set snapshot from last port scan — invalidate cache when PIDs change.
-    cached_port_pids: Vec<u32>,
+    port_scanner: PortScanner,
     cached_git: HashMap<String, (u32, u32)>,
     /// Port-owning children from previous ticks, keyed by child PID.
     /// Used to detect orphans when a session dies.
@@ -357,8 +410,7 @@ impl MultiCollector {
             collectors,
             codex_enabled,
             tick_count: SLOW_POLL_INTERVAL, // trigger on first tick
-            cached_ports: HashMap::new(),
-            cached_port_pids: Vec::new(),
+            port_scanner: PortScanner::new(),
             cached_git: HashMap::new(),
             tracked_port_children: HashMap::new(),
             orphan_ports: Vec::new(),
@@ -414,20 +466,11 @@ impl MultiCollector {
         }
         self.tick_count += 1;
 
-        // Ports: refresh on slow tick or when the PID set changes (PID reuse safety)
-        let fresh_process = SharedProcessData::fetch(Some(&self.cached_ports), slow_tick);
-        let mut current_pids: Vec<u32> = fresh_process.process_info.keys().copied().collect();
+        // Ports: rescan on slow tick or when the PID set changes (PID reuse safety).
+        let mut shared = SharedProcessData::fetch(HashMap::new(), slow_tick);
+        let mut current_pids: Vec<u32> = shared.process_info.keys().copied().collect();
         current_pids.sort_unstable();
-        let pids_changed = current_pids != self.cached_port_pids;
-
-        let mut shared = if slow_tick || pids_changed {
-            let s = SharedProcessData::fetch(None, slow_tick);
-            self.cached_ports = s.ports.clone();
-            self.cached_port_pids = current_pids;
-            s
-        } else {
-            fresh_process
-        };
+        shared.ports = self.port_scanner.update(&current_pids, slow_tick);
 
         // Detect MCP servers and stash the suppression sets in `shared`
         // so CodexCollector can avoid double-counting their rollouts.
@@ -452,30 +495,6 @@ impl MultiCollector {
             all.extend(collector.collect(&shared));
         }
 
-        // Git stats: refresh only on slow tick
-        if slow_tick {
-            self.cached_git.clear();
-            for s in &mut all {
-                let stats = process::collect_git_stats(&s.cwd);
-                self.cached_git.insert(s.cwd.clone(), stats);
-                s.git_added = stats.0;
-                s.git_modified = stats.1;
-            }
-        } else {
-            for s in &mut all {
-                if let Some(&(added, modified)) = self.cached_git.get(&s.cwd) {
-                    s.git_added = added;
-                    s.git_modified = modified;
-                } else {
-                    // New cwd not yet in cache — compute on demand to avoid false clean
-                    let stats = process::collect_git_stats(&s.cwd);
-                    self.cached_git.insert(s.cwd.clone(), stats);
-                    s.git_added = stats.0;
-                    s.git_modified = stats.1;
-                }
-            }
-        }
-
         // Hide dead sessions: Codex uses pid==0 sentinel, Claude is filtered in collect().
         // Killed sessions are only listed while the Shift+S toggle is on.
         let show_killed = self.show_killed;
@@ -484,6 +503,27 @@ impl MultiCollector {
             SessionStatus::Killed => show_killed,
             _ => true,
         });
+
+        // Git stats: refresh on slow tick; between those, compute only cwds
+        // not yet cached so a new session does not show a false clean.
+        // Runs after the filter so hidden sessions cost nothing.
+        if slow_tick {
+            self.cached_git.clear();
+        }
+        let missing: Vec<&str> = all
+            .iter()
+            .map(|s| s.cwd.as_str())
+            .filter(|cwd| !self.cached_git.contains_key(*cwd))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        self.cached_git.extend(collect_git_stats_for(&missing));
+        for s in &mut all {
+            if let Some(&(added, modified)) = self.cached_git.get(&s.cwd) {
+                s.git_added = added;
+                s.git_modified = modified;
+            }
+        }
         sort_sessions(&mut all);
 
         // --- Orphan port detection ---
@@ -540,6 +580,26 @@ impl MultiCollector {
 
         all
     }
+}
+
+/// Max `git status` processes run at once.
+const GIT_STATS_PARALLELISM: usize = 8;
+
+/// Run `git status` once per cwd, several at a time, so a tick waits for
+/// about one `git status` instead of one per session. The TUI handles keys
+/// on the same thread, so this wait is input lag.
+fn collect_git_stats_for(cwds: &[&str]) -> Vec<(String, (u32, u32))> {
+    let mut stats = Vec::with_capacity(cwds.len());
+    for chunk in cwds.chunks(GIT_STATS_PARALLELISM) {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|&cwd| scope.spawn(move || (cwd.to_string(), process::collect_git_stats(cwd))))
+                .collect();
+            stats.extend(handles.into_iter().filter_map(|h| h.join().ok()));
+        });
+    }
+    stats
 }
 
 /// Live sessions first, then Killed ones; within each group, the most recent
@@ -666,5 +726,48 @@ mod tests {
         scanner.in_flight_pids = Some(vec![42]);
 
         assert!(!scanner.should_start(&[42]));
+    }
+
+    #[test]
+    fn port_scanner_serves_cache_without_waiting_and_drops_exited_pids() {
+        let mut scanner = PortScanner::new();
+        // A scan is already running, so `update` must not start another
+        // one or wait for it.
+        scanner.scanned_once = true;
+        scanner.in_flight = true;
+        scanner.cached_pids = vec![1, 2];
+        scanner.cached = HashMap::from([(1, vec![3000]), (2, vec![4000])]);
+
+        // PID 2 exited after the scan: its port is no longer reported.
+        assert_eq!(
+            scanner.update(&[1, 3], false),
+            HashMap::from([(1, vec![3000])])
+        );
+        assert!(scanner.in_flight);
+
+        // The background result replaces the cache on the next update.
+        scanner
+            .tx
+            .send((vec![1, 3], HashMap::from([(3, vec![5000])])))
+            .unwrap();
+        assert_eq!(
+            scanner.update(&[1, 3], false),
+            HashMap::from([(3, vec![5000])])
+        );
+        assert!(!scanner.in_flight);
+        assert_eq!(scanner.cached_pids, vec![1, 3]);
+    }
+
+    #[test]
+    fn git_stats_cover_every_cwd_across_chunks() {
+        let cwds: Vec<String> = (0..GIT_STATS_PARALLELISM * 2 + 1)
+            .map(|i| format!("/nonexistent/abtop-git-stats-{i}"))
+            .collect();
+        let refs: Vec<&str> = cwds.iter().map(String::as_str).collect();
+
+        let stats: HashMap<String, (u32, u32)> = collect_git_stats_for(&refs).into_iter().collect();
+
+        assert_eq!(stats.len(), cwds.len());
+        assert!(stats.values().all(|&s| s == (0, 0)));
     }
 }
